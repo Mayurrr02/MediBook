@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from bson import ObjectId
 
 from database import db
 from models import User, Login, Doctor, Appointment
@@ -8,7 +9,6 @@ from auth import hash_password, verify_password, create_token, decode_token
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# SECURITY (THIS FIXES SWAGGER AUTH BUTTON)
 security = HTTPBearer()
 
 
@@ -76,14 +75,13 @@ async def get_doctors():
     return docs
 
 
-# ---------------- TOKEN HELPER ----------------
+# ---------------- TOKEN ----------------
 def get_user_from_token(credentials: HTTPAuthorizationCredentials):
-
     token = credentials.credentials
     return decode_token(token)
 
 
-# ---------------- APPOINTMENT ----------------
+# ---------------- BOOK APPOINTMENT ----------------
 @app.post("/appointment")
 async def appointment(
     appo: Appointment,
@@ -103,7 +101,7 @@ async def appointment(
     }
 
 
-# ---------------- GET APPOINTMENTS ----------------
+# ---------------- GET APPOINTMENTS (FIXED FINAL) ----------------
 @app.get("/appointments")
 async def get_appointments(
     credentials: HTTPAuthorizationCredentials = Depends(security)
@@ -111,10 +109,27 @@ async def get_appointments(
 
     user = get_user_from_token(credentials)
 
-    data = []
+    result_list = []
 
     async for a in db.appointments.find({"user_id": user["id"]}):
-        a["_id"] = str(a["_id"])
-        data.append(a)
 
-    return data
+        doctor_id = a.get("doctor_id")
+
+        doctor = None
+
+        # SAFE ObjectId handling (FIXED)
+        try:
+            doctor = await db.doctors.find_one({"_id": ObjectId(doctor_id)})
+        except:
+            doctor = await db.doctors.find_one({"_id": doctor_id})
+
+        result_list.append({
+            "_id": str(a["_id"]),
+            "doctor_id": doctor_id,
+            "doctor_name": doctor["name"] if doctor else "Unknown Doctor",
+            "specialization": doctor["specialization"] if doctor else "N/A",
+            "date": a.get("date"),
+            "time": a.get("time", "Not set")
+        })
+
+    return result_list

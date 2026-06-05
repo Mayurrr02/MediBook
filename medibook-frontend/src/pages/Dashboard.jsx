@@ -1,229 +1,182 @@
 import { useEffect, useState } from "react";
 import API from "../api";
+import "./Dashboard.css";
 
 export default function Dashboard() {
   const [doctors, setDoctors] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [bookingId, setBookingId] = useState(null);
+  const [appointments, setAppointments] = useState([]);
 
-  useEffect(() => {
-    fetchDoctors();
-  }, []);
+  const [selectedDoctor, setSelectedDoctor] = useState(null);
+  const [selectedDate, setSelectedDate] = useState("");
+  const [slot, setSlot] = useState("");
 
+  const slots = [
+    "10:00 AM",
+    "11:00 AM",
+    "12:00 PM",
+    "02:00 PM",
+    "04:00 PM",
+    "05:00 PM"
+  ];
+
+  // ---------------- FETCH DOCTORS ----------------
   const fetchDoctors = async () => {
     try {
       const res = await API.get("/doctors");
       setDoctors(res.data);
     } catch (err) {
       console.log(err);
-      alert("Failed to load doctors");
     }
   };
 
-  const bookAppointment = async (doctorId) => {
-    const token = localStorage.getItem("token");
+  // ---------------- FETCH APPOINTMENTS ----------------
+  const fetchAppointments = async () => {
+    try {
+      const res = await API.get("/appointments", {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`
+        }
+      });
 
-    if (!token) {
-      alert("Please login first");
+      setAppointments(res.data);
+    } catch (err) {
+      console.log(err.response?.data || err.message);
+    }
+  };
+
+  // ---------------- INITIAL LOAD ----------------
+  useEffect(() => {
+    fetchDoctors();
+    fetchAppointments();
+  }, []);
+
+  // ---------------- BOOK APPOINTMENT ----------------
+  const bookAppointment = async () => {
+    if (!selectedDoctor || !selectedDate || !slot) {
+      alert("Please select doctor, date and time slot");
       return;
     }
 
-    setLoading(true);
-    setBookingId(doctorId);
-
     try {
-      const res = await API.post(
+      await API.post(
         "/appointment",
         {
-          doctor_id: doctorId,
-          date: "2026-06-10"
+          doctor_id: selectedDoctor._id,
+          date: selectedDate,
+          time: slot
         },
         {
           headers: {
-            Authorization: `Bearer ${token}`
+            Authorization: `Bearer ${localStorage.getItem("token")}`
           }
         }
       );
 
       alert("Appointment Booked Successfully");
 
+      // reset UI
+      setSelectedDoctor(null);
+      setSelectedDate("");
+      setSlot("");
+
+      // refresh history
+      fetchAppointments();
+
     } catch (err) {
-      alert(err.response?.data?.detail || "Booking failed");
-    } finally {
-      setLoading(false);
-      setBookingId(null);
+      console.log(err.response?.data || err.message);
+      alert("Booking Failed");
     }
   };
 
   return (
-    <div style={styles.app}>
-      
-      {/* LEFT SIDEBAR */}
-      <div style={styles.sidebar}>
-        <h1 style={styles.logo}>MediBook</h1>
+    <div className="dashboard">
 
-        <div style={styles.menu}>
-          <p style={styles.menuItemActive}>🏥 Doctors</p>
-          <p style={styles.menuItem}>📅 Appointments</p>
-          <p style={styles.menuItem}>👤 Profile</p>
-        </div>
+      {/* SIDEBAR */}
+      <div className="sidebar">
+        <h2>MediBook</h2>
+        <p>Patient Dashboard</p>
+
+        <button
+          className="logout"
+          onClick={() => {
+            localStorage.removeItem("token");
+            window.location.href = "/";
+          }}
+        >
+          Logout
+        </button>
       </div>
 
-      {/* MAIN CONTENT */}
-      <div style={styles.main}>
+      {/* MAIN */}
+      <div className="main">
 
-        {/* HEADER */}
-        <div style={styles.header}>
-          <div>
-            <h2 style={styles.title}>Find Doctors</h2>
-            <p style={styles.subtitle}>
-              Book appointments with top specialists
-            </p>
-          </div>
-        </div>
+        {/* DOCTORS */}
+        <h2>Available Doctors</h2>
 
-        {/* GRID */}
-        <div style={styles.grid}>
+        <div className="doctor-grid">
           {doctors.map((doc) => (
-            <div key={doc._id} style={styles.card}>
-
-              <div style={styles.avatar}>👨‍⚕️</div>
-
-              <h3 style={styles.name}>{doc.name}</h3>
-              <p style={styles.specialization}>{doc.specialization}</p>
-
-              <div style={styles.meta}>
-                <span>{doc.experience} yrs exp</span>
-                <span>₹{doc.fee}</span>
-              </div>
-
-              <button
-                onClick={() => bookAppointment(doc._id)}
-                disabled={loading && bookingId === doc._id}
-                style={styles.button}
-              >
-                {loading && bookingId === doc._id
-                  ? "Booking..."
-                  : "Book Appointment"}
-              </button>
+            <div
+              key={doc._id}
+              className={`doctor-card ${
+                selectedDoctor?._id === doc._id ? "active" : ""
+              }`}
+              onClick={() => setSelectedDoctor(doc)}
+            >
+              <h3>Dr. {doc.name}</h3>
+              <p>{doc.specialization}</p>
+              <span>{doc.experience} yrs exp</span>
             </div>
           ))}
         </div>
+
+        {/* BOOKING */}
+        <div className="booking-section">
+          <h2>Book Appointment</h2>
+
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+          />
+
+          <div className="slot-grid">
+            {slots.map((s, i) => (
+              <div
+                key={i}
+                className={`slot ${slot === s ? "active" : ""}`}
+                onClick={() => setSlot(s)}
+              >
+                {s}
+              </div>
+            ))}
+          </div>
+
+          <button className="book-btn" onClick={bookAppointment}>
+            Confirm Booking
+          </button>
+        </div>
+
+        {/* HISTORY */}
+        <div className="history-section">
+          <h2>My Appointments</h2>
+
+          {appointments.length === 0 ? (
+            <p>No appointments yet</p>
+          ) : (
+            <div className="history-grid">
+              {appointments.map((a) => (
+                <div key={a._id} className="history-card">
+                  <h3>Dr. {a.doctor_name}</h3>
+                  <p>{a.specialization}</p>
+                  <p>Date: {a.date}</p>
+                  <p>Time: {a.time}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
       </div>
     </div>
   );
 }
-
-/* ---------------- STYLES ---------------- */
-const styles = {
-  app: {
-    display: "flex",
-    height: "100vh",
-    width: "100vw",
-    fontFamily: "Arial, sans-serif",
-    background: "#f4f6fb",
-    overflow: "hidden"
-  },
-
-  /* SIDEBAR */
-  sidebar: {
-    width: "220px",
-    background: "#1f2937",
-    color: "white",
-    padding: "20px",
-    display: "flex",
-    flexDirection: "column"
-  },
-
-  logo: {
-    marginBottom: "30px",
-    fontSize: "24px"
-  },
-
-  menu: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "15px"
-  },
-
-  menuItem: {
-    color: "#cbd5e1",
-    cursor: "pointer"
-  },
-
-  menuItemActive: {
-    color: "white",
-    fontWeight: "bold"
-  },
-
-  /* MAIN */
-  main: {
-    flex: 1,
-    padding: "30px",
-    overflowY: "auto"
-  },
-
-  header: {
-    marginBottom: "25px"
-  },
-
-  title: {
-    fontSize: "28px",
-    margin: 0
-  },
-
-  subtitle: {
-    color: "#666",
-    marginTop: "5px"
-  },
-
-  /* GRID */
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-    gap: "20px"
-  },
-
-  /* CARD */
-  card: {
-    background: "#fff",
-    borderRadius: "14px",
-    padding: "18px",
-    boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
-    transition: "0.3s",
-    textAlign: "center"
-  },
-
-  avatar: {
-    fontSize: "35px",
-    marginBottom: "10px"
-  },
-
-  name: {
-    margin: "8px 0"
-  },
-
-  specialization: {
-    color: "#2563eb",
-    fontWeight: "bold"
-  },
-
-  meta: {
-    display: "flex",
-    justifyContent: "space-between",
-    margin: "12px 0",
-    fontSize: "13px",
-    color: "#555"
-  },
-
-  button: {
-    width: "100%",
-    padding: "10px",
-    border: "none",
-    borderRadius: "8px",
-    background: "#2563eb",
-    color: "white",
-    fontWeight: "bold",
-    cursor: "pointer"
-  }
-};

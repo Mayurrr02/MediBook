@@ -1,5 +1,6 @@
 import { useState } from "react";
 import API from "../api";
+import "./Auth.css";
 
 export default function Register() {
   const [form, setForm] = useState({
@@ -8,7 +9,9 @@ export default function Register() {
     password: ""
   });
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+
     try {
       const res = await API.post("/register", form);
       alert("Registered Successfully");
@@ -20,20 +23,41 @@ export default function Register() {
   };
 
   return (
-    <div style={{ padding: 20 }}>
-      <h2>Register</h2>
+    <div className="auth-page">
+      <div className="auth-card">
+        <h2>Create Account</h2>
+        <p>Join MediBook and book appointments easily</p>
 
-      <input placeholder="Name"
-        onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <form onSubmit={handleSubmit} className="auth-form">
+          <input
+            placeholder="Full Name"
+            onChange={(e) =>
+              setForm({ ...form, name: e.target.value })
+            }
+            required
+          />
 
-      <input placeholder="Email"
-        onChange={(e) => setForm({ ...form, email: e.target.value })} />
+          <input
+            placeholder="Email"
+            type="email"
+            onChange={(e) =>
+              setForm({ ...form, email: e.target.value })
+            }
+            required
+          />
 
-      <input placeholder="Password"
-        type="password"
-        onChange={(e) => setForm({ ...form, password: e.target.value })} />
+          <input
+            placeholder="Password"
+            type="password"
+            onChange={(e) =>
+              setForm({ ...form, password: e.target.value })
+            }
+            required
+          />
 
-      <button onClick={handleSubmit}>Register</button>
+          <button type="submit">Register</button>
+        </form>
+      </div>
     </div>
   );
 }

@@ -22,3 +22,4 @@ class Doctor(BaseModel):
 class Appointment(BaseModel):
     doctor_id: str
     date: str
+    time: str
