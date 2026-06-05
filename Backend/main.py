@@ -1,16 +1,25 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
 from database import db
 from models import User, Login, Doctor, Appointment
 from auth import hash_password, verify_password, create_token, decode_token
-from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# SECURITY (THIS FIXES SWAGGER AUTH BUTTON)
+security = HTTPBearer()
+
 
 # ---------------- REGISTER ----------------
 @app.post("/register")
@@ -28,10 +37,7 @@ async def register(user: User):
 
     result = await db.users.insert_one(data)
 
-    return {
-        "message": "User registered",
-        "id": str(result.inserted_id)
-    }
+    return {"message": "registered", "id": str(result.inserted_id)}
 
 
 # ---------------- LOGIN ----------------
@@ -48,49 +54,43 @@ async def login(user: Login):
 
     token = create_token({"id": str(db_user["_id"])})
 
-    return {"token": token}
+    return {
+        "token": token,
+        "user_id": str(db_user["_id"])
+    }
 
 
-# ---------------- ADD DOCTOR ----------------
+# ---------------- DOCTORS ----------------
 @app.post("/doctor")
 async def add_doctor(doc: Doctor):
-
     result = await db.doctors.insert_one(doc.dict())
-
     return {"id": str(result.inserted_id)}
 
 
-# ---------------- GET DOCTORS ----------------
 @app.get("/doctors")
 async def get_doctors():
-
     docs = []
     async for d in db.doctors.find():
         d["_id"] = str(d["_id"])
         docs.append(d)
-
     return docs
 
 
-# ---------------- BOOK APPOINTMENT ----------------
+# ---------------- TOKEN HELPER ----------------
+def get_user_from_token(credentials: HTTPAuthorizationCredentials):
+
+    token = credentials.credentials
+    return decode_token(token)
+
+
+# ---------------- APPOINTMENT ----------------
 @app.post("/appointment")
-async def appointment(appo: Appointment, authorization: str = Header(None)):
+async def appointment(
+    appo: Appointment,
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
 
-    print("HEADER RECEIVED:", authorization)
-
-    if not authorization:
-        return {"error": "Missing token"}
-
-    try:
-        scheme, token = authorization.split()
-        print("TOKEN:", token)
-
-        user = decode_token(token)
-        print("USER:", user)
-
-    except Exception as e:
-        print("ERROR:", str(e))
-        return {"error": "Invalid token", "details": str(e)}
+    user = get_user_from_token(credentials)
 
     data = appo.dict()
     data["user_id"] = user["id"]
@@ -101,12 +101,15 @@ async def appointment(appo: Appointment, authorization: str = Header(None)):
         "message": "appointment created",
         "id": str(result.inserted_id)
     }
+
+
 # ---------------- GET APPOINTMENTS ----------------
 @app.get("/appointments")
-async def get_appointments(authorization: str = Header(None)):
+async def get_appointments(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
 
-    token = authorization.split(" ")[1]
-    user = decode_token(token)
+    user = get_user_from_token(credentials)
 
     data = []
 

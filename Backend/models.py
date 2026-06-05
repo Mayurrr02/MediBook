@@ -20,6 +20,5 @@ class Doctor(BaseModel):
 
 # APPOINTMENT MODEL
 class Appointment(BaseModel):
-    user_id: str
     doctor_id: str
     date: str
