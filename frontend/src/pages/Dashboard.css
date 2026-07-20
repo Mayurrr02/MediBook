@@ -1,0 +1,118 @@
+.dashboard {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  background: #1a1a2e;
+  color: white;
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sidebar h2 {
+  margin: 0;
+}
+
+.badge {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.badge.premium {
+  background: #facc15;
+  color: #1a1a2e;
+  font-weight: 700;
+}
+
+.badge.upgrade {
+  background: #2563eb;
+  color: white;
+}
+
+.nav-link {
+  color: white;
+  font-size: 14px;
+  text-decoration: none;
+  margin-top: 8px;
+}
+
+.logout {
+  margin-top: auto;
+  background: transparent;
+  border: 1px solid #444;
+  color: white;
+  padding: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.main {
+  flex: 1;
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.doctor-grid,
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.doctor-card,
+.history-card {
+  background: white;
+  padding: 16px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+
+.doctor-card.active {
+  border-color: #2563eb;
+}
+
+.booking-section {
+  background: white;
+  padding: 20px;
+  border-radius: 10px;
+  margin-bottom: 24px;
+}
+
+.slot-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.slot {
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: #eef1f8;
+  cursor: pointer;
+}
+
+.slot.active {
+  background: #2563eb;
+  color: white;
+}
+
+.book-btn {
+  padding: 10px 20px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}

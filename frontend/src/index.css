@@ -1,0 +1,76 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #f4f6fb;
+  color: #1a1a2e;
+}
+
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.auth-card {
+  background: white;
+  padding: 32px;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-card.wide {
+  max-width: 520px;
+}
+
+.auth-card input,
+.auth-card textarea {
+  padding: 10px 12px;
+  border: 1px solid #d8dce6;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.auth-card button {
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auth-card button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  color: #dc2626;
+  font-size: 13px;
+  margin: 0;
+}
+
+.disclaimer {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.result-box {
+  background: #f0f4ff;
+  border-radius: 8px;
+  padding: 12px;
+  white-space: pre-wrap;
+  font-size: 14px;
+}
