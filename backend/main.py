@@ -6,7 +6,9 @@ from database import init_indexes
 from routers import auth_routes, doctors, appointments, payment, symptom_checker
 
 app = FastAPI(title="MediBook API")
-
+origins = [
+    "https://medibook-1-moc8.onrender.com",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
