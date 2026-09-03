@@ -15,4 +15,8 @@ PREMIUM_AMOUNT_PAISE = int(os.getenv("PREMIUM_AMOUNT_PAISE", "49900"))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+SLOT_LOCK_TTL_SECONDS = int(os.getenv("SLOT_LOCK_TTL_SECONDS", "300"))
+DEFAULT_SLOT_DURATION_MINUTES = int(os.getenv("DEFAULT_SLOT_DURATION_MINUTES", "30"))
+
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")

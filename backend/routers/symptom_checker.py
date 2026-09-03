@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from google import genai
-from google.genai import types
-from google.genai.errors import APIError
+import importlib
+types = importlib.import_module("google.genai.types")
+APIError = importlib.import_module("google.genai.errors").APIError
 
 from config import GEMINI_API_KEY
 from models import SymptomCheckRequest

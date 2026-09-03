@@ -1,51 +1,152 @@
+from typing import List, Optional
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException
 
 from database import db
-from models import Appointment
+from models import (
+    Appointment,
+    CancelAppointmentRequest,
+    RescheduleAppointmentRequest,
+    UpdateAppointmentStatusRequest,
+    AppointmentResponse,
+    AppointmentStatus,
+)
 from dependencies import get_current_user
+from services.appointment_service import (
+    book_appointment as service_book_appointment,
+    cancel_appointment as service_cancel_appointment,
+    reschedule_appointment as service_reschedule_appointment,
+    update_appointment_status as service_update_appointment_status,
+    list_user_appointments,
+)
 
 router = APIRouter(tags=["appointments"])
 
 
 @router.post("/appointment")
 async def book_appointment(appo: Appointment, user: dict = Depends(get_current_user)):
-    # Prevent double-booking: same doctor, same date, same slot.
-    clash = await db.appointments.find_one({
-        "doctor_id": appo.doctor_id,
-        "date": appo.date,
-        "time": appo.time,
-    })
-    if clash:
-        raise HTTPException(409, "This slot is already booked. Please pick another.")
-
-    data = appo.dict()
-    data["user_id"] = user["_id"]
-
-    result = await db.appointments.insert_one(data)
-    return {"message": "appointment created", "id": str(result.inserted_id)}
+    """
+    Books an appointment for the authenticated patient with distributed locking
+    and double-booking prevention.
+    """
+    res = await service_book_appointment(
+        doctor_id=appo.doctor_id,
+        date=appo.date,
+        time_slot=appo.time,
+        user=user,
+        lock_token=appo.lock_token,
+        reason=appo.reason,
+        patient_notes=appo.patient_notes,
+    )
+    return {
+        "message": "appointment created",
+        "id": res["id"],
+        "status": res.get("status", AppointmentStatus.CONFIRMED.value),
+        "doctor_name": res.get("doctor_name"),
+        "date": res.get("date"),
+        "time": res.get("time"),
+    }
 
 
 @router.get("/appointments")
 async def get_appointments(user: dict = Depends(get_current_user)):
-    result_list = []
+    """
+    Retrieves all appointments booked by the authenticated user.
+    """
+    return await list_user_appointments(user["_id"])
 
-    async for a in db.appointments.find({"user_id": user["_id"]}):
-        doctor_id = a.get("doctor_id")
-        doctor = None
+
+@router.get("/appointments/{appointment_id}")
+async def get_appointment_by_id(appointment_id: str, user: dict = Depends(get_current_user)):
+    """
+    Retrieves a single appointment by ID with permission check.
+    """
+    try:
+        appt = await db.appointments.find_one({"_id": ObjectId(appointment_id)})
+    except (InvalidId, Exception):
+        appt = None
+
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    user_id = str(user["_id"])
+    is_owner = str(appt.get("user_id")) == user_id
+    is_admin = bool(user.get("is_admin"))
+
+    if not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="Not authorized to view this appointment")
+
+    doctor = None
+    if appt.get("doctor_id"):
         try:
-            doctor = await db.doctors.find_one({"_id": ObjectId(doctor_id)})
-        except InvalidId:
-            doctor = None
+            doctor = await db.doctors.find_one({"_id": ObjectId(appt["doctor_id"])})
+        except Exception:
+            pass
 
-        result_list.append({
-            "_id": str(a["_id"]),
-            "doctor_id": doctor_id,
-            "doctor_name": doctor["name"] if doctor else "Unknown Doctor",
-            "specialization": doctor["specialization"] if doctor else "N/A",
-            "date": a.get("date"),
-            "time": a.get("time", "Not set"),
-        })
+    return {
+        "_id": str(appt["_id"]),
+        "doctor_id": appt.get("doctor_id"),
+        "doctor_name": appt.get("doctor_name") or (doctor["name"] if doctor else "Unknown Doctor"),
+        "specialization": appt.get("specialization") or (doctor["specialization"] if doctor else "General"),
+        "date": appt.get("date"),
+        "time": appt.get("time"),
+        "status": appt.get("status", AppointmentStatus.CONFIRMED.value),
+        "reason": appt.get("reason"),
+        "patient_notes": appt.get("patient_notes"),
+        "created_at": appt.get("created_at"),
+        "cancelled_at": appt.get("cancelled_at"),
+        "cancellation_reason": appt.get("cancellation_reason"),
+    }
 
-    return result_list
+
+@router.post("/appointments/{appointment_id}/cancel")
+async def cancel_appointment(
+    appointment_id: str,
+    req: CancelAppointmentRequest = CancelAppointmentRequest(),
+    user: dict = Depends(get_current_user)
+):
+    """
+    Cancels an existing appointment.
+    """
+    return await service_cancel_appointment(
+        appointment_id=appointment_id,
+        user=user,
+        reason=req.reason or "Patient requested cancellation"
+    )
+
+
+@router.post("/appointments/{appointment_id}/reschedule")
+async def reschedule_appointment(
+    appointment_id: str,
+    req: RescheduleAppointmentRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Reschedules an existing appointment to a new date/time slot.
+    """
+    return await service_reschedule_appointment(
+        appointment_id=appointment_id,
+        new_date=req.new_date,
+        new_time=req.new_time,
+        user=user,
+        new_lock_token=req.new_lock_token,
+        reason=req.reason,
+    )
+
+
+@router.patch("/appointments/{appointment_id}/status")
+async def update_status(
+    appointment_id: str,
+    req: UpdateAppointmentStatusRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Updates the lifecycle status of an appointment (Doctor / Admin).
+    """
+    return await service_update_appointment_status(
+        appointment_id=appointment_id,
+        target_status=req.status,
+        user=user,
+        notes=req.notes
+    )
