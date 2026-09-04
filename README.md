@@ -1,66 +1,102 @@
-# MediBook
+# MediBook: Intelligent Healthcare Appointment & Scheduling Platform
 
-Healthcare appointment booking with a Razorpay-powered premium tier and an
-OpenAI-based symptom checker, gated behind payment.
+MediBook is a production-oriented intelligent healthcare appointment scheduling platform built on a modular monolith architecture with FastAPI, MongoDB, Redis, and React.
 
-## Stack
-- Backend: FastAPI, MongoDB (Motor async driver), JWT auth (bcrypt-hashed passwords)
-- Frontend: React + Vite, React Router
-- Payments: Razorpay (order + signature verification + webhook)
-- Premium feature: OpenAI-powered symptom checker
+> [!NOTE]
+> **Safety & Engineering Notice**: MediBook is an engineering showcase and scheduling platform. It does not provide medical diagnoses or claim HIPAA compliance.
 
-## What changed from the previous version
-- Bcrypt password hashing (was unsalted SHA256)
-- Token errors return 401 instead of crashing with 500
-- `/doctor` creation is admin-only (was open to anyone)
-- Unique index on `email`, compound index prevents double-booking a slot
-- `/register` returns proper HTTP error codes instead of always 200
-- Removed duplicate `.jsx`/`.tsx` scaffolding files
-- API base URL and Razorpay key now come from env vars, not hardcoded
-- Axios auto-attaches the token and redirects to login on 401
-- New: `is_premium` flag, Razorpay order/verify/webhook routes, premium-gated symptom checker
+---
 
-## Setup
+## 🛠️ Tech Stack
+- **Backend**: Python 3.9+, FastAPI, Motor (Async MongoDB), Redis (Distributed Locks & In-Memory Cache)
+- **Frontend**: React 18, Vite, React Router, Axios
+- **Payments**: Razorpay (Order creation + HMAC-SHA256 signature verification + Webhooks)
+- **AI & Triage**: Google GenAI (Gemini) with clinical triage and emergency guardrails
+- **Testing**: Pytest & pytest-asyncio test suite with high-concurrency race condition testing
 
-### Backend
+---
+
+## 🚀 Key Features Implemented (Phase 1)
+
+### 1. Dynamic Scheduling Engine
+- Dynamic time-slot generation computed on demand based on doctor working hours, shift start/end, break intervals (e.g. lunch breaks), and blocked vacation dates.
+- Configurable doctor schedules via `GET /doctor/{id}/schedule` and `PUT /doctor/{id}/schedule`.
+
+### 2. Redis Distributed Slot Locking
+- Distributed mutex locking on slots using atomic Redis `SET ... NX EX` with configurable TTL (default 300s).
+- Atomic lock release via SHA Lua script ensuring only the token holder can release the lock.
+- Zero double-booking guarantee under concurrent booking attempts.
+- Graceful in-memory fallback for local environments without an active Redis instance.
+
+### 3. Formal Appointment Lifecycle State Machine
+- Strict status transitions:
+  - `PENDING_CONFIRMATION` ➔ `CONFIRMED`
+  - `CONFIRMED` ➔ `IN_PROGRESS` | `COMPLETED` | `CANCELLED` | `RESCHEDULED` | `NO_SHOW`
+  - `IN_PROGRESS` ➔ `COMPLETED` | `CANCELLED`
+  - `COMPLETED`, `CANCELLED`, `RESCHEDULED`, `NO_SHOW` are immutable terminal states.
+- Dedicated endpoints for cancellation (`POST /appointments/{id}/cancel`), rescheduling (`POST /appointments/{id}/reschedule`), and status updating (`PATCH /appointments/{id}/status`).
+
+### 4. Comprehensive Automated Test Suite
+- 15 automated Pytest unit and integration tests covering:
+  - Scheduling slot math & break overlaps
+  - Redis distributed locking, token validation, and TTL expiry
+  - 20-concurrent-user race condition simulations
+  - State machine transition validation
+  - API endpoints and health checks
+
+---
+
+## 🔧 Setup & Running
+
+### Backend Setup
 ```bash
 cd backend
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in MONGO_URI, JWT_SECRET, Razorpay + OpenAI keys
+cp .env.example .env   # Configure MONGO_URI, REDIS_URL, JWT_SECRET, etc.
 uvicorn main:app --reload
 ```
-API runs at http://127.0.0.1:8000 — interactive docs at `/docs`.
+- API runs at `http://127.0.0.1:8000`
+- Interactive Swagger docs at `http://127.0.0.1:8000/docs`
+- Health check at `http://127.0.0.1:8000/health`
 
-### Frontend
+### Running Backend Tests
+```bash
+cd backend
+pytest backend/tests -v
+```
+
+### Frontend Setup
 ```bash
 cd frontend
 npm install
-cp .env.example .env   # set VITE_API_URL and VITE_RAZORPAY_KEY_ID
 npm run dev
 ```
-Runs at http://localhost:5173.
+- Frontend runs at `http://localhost:5173`
 
-### First admin / doctors
-There's no signup flag for admin (by design — don't expose that in a public
-register form). After registering your own account, flip it manually in Mongo:
-```js
-db.users.updateOne({ email: "you@example.com" }, { $set: { is_admin: true } })
-```
-Then use your token to `POST /doctor` and seed some doctors.
+---
 
-### Razorpay test mode
-Use Razorpay's test key pair and their test card (4111 1111 1111 1111, any
-future expiry/CVV) to run the premium upgrade flow end to end without real money.
+## 📖 API Endpoints Overview
 
-### Razorpay webhook (optional but recommended)
-In the Razorpay dashboard, add a webhook pointing to
-`POST /payment/webhook` with the `payment.captured` event enabled, and put
-the webhook secret in `RAZORPAY_KEY_SECRET`. This is the fallback that
-unlocks premium even if the browser tab closes before `/payment/verify` runs.
-
-## Known gaps / next steps
-- No refund handling or subscription expiry — `is_premium` is permanent once set
-- No rate limiting on `/login` or `/register`
-- No automated tests yet
-- Admin promotion is manual (Mongo shell) — fine for a portfolio project, not for production
+| Method | Endpoint | Description | Auth Required |
+|---|---|---|---|
+| `GET` | `/health` | Health probe (MongoDB, Redis status) | Public |
+| `POST` | `/register` | Register new user account | Public |
+| `POST` | `/login` | Authenticate and obtain JWT | Public |
+| `GET` | `/doctors` | List all active doctors | Public |
+| `GET` | `/doctor/{id}` | Get specific doctor profile | Public |
+| `GET` | `/doctor/{id}/schedule` | Get doctor working hours & shifts | Public |
+| `PUT` | `/doctor/{id}/schedule` | Update doctor schedule | Doctor/Admin |
+| `GET` | `/doctors/{id}/slots` | Get real-time dynamic slots & lock status | Optional |
+| `POST` | `/slots/lock` | Acquire distributed lock on slot | Patient |
+| `POST` | `/slots/unlock` | Release distributed lock on slot | Patient |
+| `POST` | `/appointment` | Book appointment with lock verification | Patient |
+| `GET` | `/appointments` | List patient appointment history | Patient |
+| `GET` | `/appointments/{id}` | Get appointment details | Patient/Doctor/Admin |
+| `POST` | `/appointments/{id}/cancel` | Cancel an appointment | Patient/Doctor/Admin |
+| `POST` | `/appointments/{id}/reschedule` | Reschedule an appointment | Patient/Admin |
+| `PATCH` | `/appointments/{id}/status` | Update appointment state | Doctor/Admin |
+| `POST` | `/payment/create-order` | Create Razorpay premium order | Patient |
+| `POST` | `/payment/verify` | Verify payment signature | Patient |
+| `POST` | `/payment/webhook` | Razorpay webhook callback | Public (HMAC Verified) |
+| `POST` | `/premium/symptom-checker` | AI Symptom analysis | Premium Patient |
