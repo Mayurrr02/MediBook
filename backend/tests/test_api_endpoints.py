@@ -33,48 +33,32 @@ async def test_api_home_and_health():
         assert health_res.status_code == 200
         health_data = health_res.json()
         assert "status" in health_data
-        assert "cache_and_locks" in health_data
 
 
 @pytest.mark.asyncio
-async def test_get_doctor_slots_endpoint():
+async def test_get_available_slots_endpoint():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         doc_id = "60c72b2f9b1d8b2bad000001"
-        res = await ac.get(f"/doctors/{doc_id}/slots?date=2026-10-15")
+        # Test Monday slot generation
+        res = await ac.get(f"/api/v1/appointments/available-slots?doctor_id={doc_id}&date=2026-10-12&appointment_type=IN_PERSON")
         assert res.status_code == 200
         data = res.json()
         assert data["doctor_id"] == doc_id
-        assert data["date"] == "2026-10-15"
-        assert "slots" in data
-        assert len(data["slots"]) > 0
+        assert data["date"] == "2026-10-12"
+        assert "available_slots" in data
+        assert "booked_slots" in data
+        assert "unavailable_periods" in data
+        assert data["duration_minutes"] == 30
+        assert data["buffer_minutes"] == 10
 
 
 @pytest.mark.asyncio
-async def test_slot_lock_and_unlock_api_flow():
-    headers = {"Authorization": "Bearer mock_token_header"}
-
+async def test_get_doctor_availability_endpoint():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         doc_id = "60c72b2f9b1d8b2bad000001"
-        date = "2026-10-15"
-        time_slot = "11:30 AM"
-
-        # 1. Lock slot
-        lock_res = await ac.post(
-            "/slots/lock",
-            json={"doctor_id": doc_id, "date": date, "time": time_slot, "ttl_seconds": 60},
-            headers=headers
-        )
-        assert lock_res.status_code == 200
-        lock_data = lock_res.json()
-        assert lock_data["success"] is True
-        lock_token = lock_data["lock_token"]
-        assert lock_token is not None
-
-        # 2. Unlock slot
-        unlock_res = await ac.post(
-            "/slots/unlock",
-            json={"doctor_id": doc_id, "date": date, "time": time_slot, "lock_token": lock_token},
-            headers=headers
-        )
-        assert unlock_res.status_code == 200
-        assert unlock_res.json()["status"] == "unlocked"
+        res = await ac.get(f"/api/v1/doctors/{doc_id}/availability")
+        assert res.status_code == 200
+        data = res.json()
+        assert "working_days" in data
+        assert "shifts" in data
+        assert "breaks" in data

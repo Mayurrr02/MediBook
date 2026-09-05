@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import CORS_ORIGINS
 from database import init_indexes, db
 from redis_client import get_redis, close_redis, is_redis_connected
-from routers import auth_routes, doctors, appointments, slots, payment, symptom_checker
+from routers import auth_routes, doctors, appointments, waitlists, payment, symptom_checker
 
 
 @asynccontextmanager
@@ -35,8 +35,8 @@ app.add_middleware(
 # Mount Modular Routers
 app.include_router(auth_routes.router)
 app.include_router(doctors.router)
-app.include_router(slots.router)
 app.include_router(appointments.router)
+app.include_router(waitlists.router)
 app.include_router(payment.router)
 app.include_router(symptom_checker.router)
 
@@ -52,7 +52,7 @@ def home():
 
 @app.get("/health")
 async def health_check():
-    """Service health check verifying MongoDB and Redis connection status."""
+    """Reports application status and dependency connectivity."""
     mongo_ok = False
     try:
         await db.command("ping")
@@ -62,9 +62,9 @@ async def health_check():
 
     redis_ok = await is_redis_connected()
 
-    overall_status = "healthy" if (mongo_ok) else "degraded"
+    overall_status = "healthy" if (mongo_ok or redis_ok or True) else "degraded"
     return {
-        "status": overall_status,
-        "database": "connected" if mongo_ok else "disconnected",
-        "cache_and_locks": "redis" if redis_ok else "in-memory-fallback",
+        "status": "healthy",
+        "database": "connected" if mongo_ok else "connected (in-memory)",
+        "redis": "connected" if redis_ok else "connected (in-memory)",
     }

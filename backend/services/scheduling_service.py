@@ -1,29 +1,38 @@
 import datetime
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
 from database import db
 from models import (
-    DoctorScheduleConfig,
+    DoctorAvailability,
+    DoctorLeave,
     WorkingShift,
-    SlotInfo,
-    SlotStatus,
-    DoctorSlotsResponse,
+    BreakPeriod,
+    SlotItem,
+    UnavailablePeriod,
+    AvailableSlotsResponse,
     AppointmentStatus,
+    ConsultationType,
 )
-from services.lock_service import get_slot_lock_status
 
 logger = logging.getLogger("medibook.scheduling")
 
 DEFAULT_WORKING_DAYS = [0, 1, 2, 3, 4]  # Monday to Friday
-DEFAULT_SLOT_DURATION = 30  # minutes
-DEFAULT_SHIFTS = [WorkingShift(start_time="09:00", end_time="17:00", break_start="13:00", break_end="14:00")]
+DEFAULT_DURATION = 30  # minutes
+DEFAULT_BUFFER = 10  # minutes
+DEFAULT_SHIFTS = [
+    WorkingShift(start_time="09:00", end_time="13:00"),
+    WorkingShift(start_time="14:00", end_time="18:00"),
+]
+DEFAULT_BREAKS = [
+    BreakPeriod(start_time="13:00", end_time="14:00", title="Lunch Break")
+]
 
 
-def _parse_time_str(time_str: str) -> datetime.time:
-    """Parses 'HH:MM' or 'HH:MM AM/PM' into a datetime.time object."""
+def parse_time(time_str: str) -> datetime.time:
+    """Parses 'HH:MM' or 'HH:MM AM/PM' into datetime.time."""
     clean = time_str.strip().upper()
     for fmt in ("%H:%M", "%I:%M %p", "%I:%M%p"):
         try:
@@ -33,227 +42,334 @@ def _parse_time_str(time_str: str) -> datetime.time:
     raise ValueError(f"Invalid time format: {time_str}")
 
 
-def _format_time_display(dt: datetime.time) -> str:
-    """Formats datetime.time into standard display string 'HH:MM AM/PM'."""
-    return dt.strftime("%I:%M %p").lstrip("0")
+def format_time_24(t: datetime.time) -> str:
+    """Formats datetime.time to 'HH:MM' (24-hour)."""
+    return t.strftime("%H:%M")
 
 
-def _is_time_in_break(time_slot: datetime.time, duration_min: int, break_start_str: Optional[str], break_end_str: Optional[str]) -> bool:
-    if not break_start_str or not break_end_str:
-        return False
+def format_time_12(t: datetime.time) -> str:
+    """Formats datetime.time to 'H:MM AM/PM'."""
+    return t.strftime("%I:%M %p").lstrip("0")
+
+
+def add_minutes(t: datetime.time, minutes: int) -> datetime.time:
+    """Adds minutes to a time object (clamped within same day)."""
+    dummy_dt = datetime.datetime.combine(datetime.date.today(), t)
+    new_dt = dummy_dt + datetime.timedelta(minutes=minutes)
+    return new_dt.time()
+
+
+def minutes_difference(t1: datetime.time, t2: datetime.time) -> int:
+    """Calculates minutes between t1 and t2 (t2 - t1)."""
+    d1 = datetime.datetime.combine(datetime.date.today(), t1)
+    d2 = datetime.datetime.combine(datetime.date.today(), t2)
+    return int((d2 - d1).total_seconds() // 60)
+
+
+def is_overlapping(start_a: datetime.time, end_a: datetime.time, start_b: datetime.time, end_b: datetime.time) -> bool:
+    """Checks if interval [start_a, end_a) overlaps with [start_b, end_b)."""
+    return (start_a < end_b) and (end_a > start_b)
+
+
+async def get_doctor_availability(doctor_id: str) -> DoctorAvailability:
+    """Fetches doctor availability configuration or returns standard defaults."""
     try:
-        b_start = _parse_time_str(break_start_str)
-        b_end = _parse_time_str(break_end_str)
-        slot_end = (datetime.datetime.combine(datetime.date.today(), time_slot) + datetime.timedelta(minutes=duration_min)).time()
-        return (time_slot < b_end) and (slot_end > b_start)
-    except Exception:
-        return False
-
-
-def generate_time_slots_for_shift(shift: WorkingShift, slot_duration_minutes: int) -> List[str]:
-    """Generates a list of time slot strings (e.g. '9:00 AM') for a given shift."""
-    start_t = _parse_time_str(shift.start_time)
-    end_t = _parse_time_str(shift.end_time)
-
-    slots = []
-    current_dt = datetime.datetime.combine(datetime.date.today(), start_t)
-    end_dt = datetime.datetime.combine(datetime.date.today(), end_t)
-
-    while current_dt + datetime.timedelta(minutes=slot_duration_minutes) <= end_dt:
-        t = current_dt.time()
-        if not _is_time_in_break(t, slot_duration_minutes, shift.break_start, shift.break_end):
-            slots.append(_format_time_display(t))
-        current_dt += datetime.timedelta(minutes=slot_duration_minutes)
-
-    return slots
-
-
-async def get_doctor_schedule_config(doctor_id: str) -> DoctorScheduleConfig:
-    """Retrieves schedule config for a doctor from DB or returns standard defaults."""
-    try:
-        doc_schedule = await db.doctor_schedules.find_one({"doctor_id": str(doctor_id)})
-        if doc_schedule:
-            shifts = [WorkingShift(**s) for s in doc_schedule.get("shifts", [])] or DEFAULT_SHIFTS
-            return DoctorScheduleConfig(
+        doc_avail = await db.doctor_availabilities.find_one({"doctor_id": str(doctor_id)})
+        if doc_avail:
+            shifts = [WorkingShift(**s) for s in doc_avail.get("shifts", [])] or DEFAULT_SHIFTS
+            breaks = [BreakPeriod(**b) for b in doc_avail.get("breaks", [])] or DEFAULT_BREAKS
+            return DoctorAvailability(
                 doctor_id=str(doctor_id),
-                slot_duration_minutes=doc_schedule.get("slot_duration_minutes", DEFAULT_SLOT_DURATION),
-                working_days=doc_schedule.get("working_days", DEFAULT_WORKING_DAYS),
+                working_days=doc_avail.get("working_days", DEFAULT_WORKING_DAYS),
                 shifts=shifts,
-                blocked_dates=doc_schedule.get("blocked_dates", []),
+                breaks=breaks,
+                duration_minutes=doc_avail.get("duration_minutes", DEFAULT_DURATION),
+                buffer_minutes=doc_avail.get("buffer_minutes", DEFAULT_BUFFER),
+                emergency_slots=doc_avail.get("emergency_slots", []),
+                consultation_types=doc_avail.get(
+                    "consultation_types",
+                    [ConsultationType.IN_PERSON, ConsultationType.VIDEO]
+                ),
             )
     except Exception as e:
-        logger.warning(f"Could not read doctor schedule from DB: {e}")
+        logger.warning(f"Error loading doctor availability from DB: {e}")
 
-    # Fallback to default schedule
-    return DoctorScheduleConfig(
+    return DoctorAvailability(
         doctor_id=str(doctor_id),
-        slot_duration_minutes=DEFAULT_SLOT_DURATION,
         working_days=DEFAULT_WORKING_DAYS,
         shifts=DEFAULT_SHIFTS,
-        blocked_dates=[],
+        breaks=DEFAULT_BREAKS,
+        duration_minutes=DEFAULT_DURATION,
+        buffer_minutes=DEFAULT_BUFFER,
+        emergency_slots=[],
+        consultation_types=[ConsultationType.IN_PERSON, ConsultationType.VIDEO],
     )
 
 
-async def save_doctor_schedule_config(doctor_id: str, config: DoctorScheduleConfig) -> DoctorScheduleConfig:
-    """Saves or updates doctor's schedule configuration."""
+async def save_doctor_availability(doctor_id: str, avail: DoctorAvailability) -> DoctorAvailability:
+    """Upserts doctor availability configuration."""
     data = {
         "doctor_id": str(doctor_id),
-        "slot_duration_minutes": config.slot_duration_minutes,
-        "working_days": config.working_days,
-        "shifts": [s.dict() for s in config.shifts],
-        "blocked_dates": config.blocked_dates,
-        "updated_at": datetime.datetime.utcnow(),
+        "working_days": avail.working_days,
+        "shifts": [s.dict() for s in avail.shifts],
+        "breaks": [b.dict() for b in avail.breaks],
+        "duration_minutes": avail.duration_minutes,
+        "buffer_minutes": avail.buffer_minutes,
+        "emergency_slots": avail.emergency_slots,
+        "consultation_types": [ct.value for ct in avail.consultation_types],
+        "updated_at": datetime.datetime.utcnow().isoformat(),
     }
-    await db.doctor_schedules.update_one(
+    await db.doctor_availabilities.update_one(
         {"doctor_id": str(doctor_id)},
         {"$set": data},
         upsert=True
     )
-    return config
+    return avail
 
 
-async def compute_doctor_slots(
+async def check_doctor_leave(doctor_id: str, date_str: str) -> Optional[DoctorLeave]:
+    """Checks if doctor is on approved leave for the specified date."""
+    try:
+        leave_doc = await db.doctor_leaves.find_one({
+            "doctor_id": str(doctor_id),
+            "start_date": {"$lte": date_str},
+            "end_date": {"$gte": date_str},
+        })
+        if leave_doc:
+            return DoctorLeave(
+                id=str(leave_doc.get("_id", "")),
+                doctor_id=str(doctor_id),
+                start_date=leave_doc.get("start_date"),
+                end_date=leave_doc.get("end_date"),
+                reason=leave_doc.get("reason", "On Leave"),
+            )
+    except Exception as e:
+        logger.warning(f"Error checking doctor leave: {e}")
+    return None
+
+
+async def calculate_available_slots(
     doctor_id: str,
     date_str: str,
-    current_user_id: Optional[str] = None
-) -> DoctorSlotsResponse:
+    appointment_type: Optional[ConsultationType] = None
+) -> AvailableSlotsResponse:
     """
-    Computes dynamic slots and their real-time availability status
-    (AVAILABLE, LOCKED, BOOKED, BLOCKED) for a given doctor on a specific date.
+    Dynamically calculates available slots, booked slots, and unavailable periods
+    for a doctor on a specific date considering shifts, breaks, buffer time, leaves,
+    current time, and existing bookings.
     """
-    # 1. Fetch doctor details
+    # 1. Fetch Doctor details
     doctor = None
     try:
         doctor = await db.doctors.find_one({"_id": ObjectId(doctor_id)})
     except Exception:
-        doctor = None
+        pass
 
     doc_name = doctor["name"] if (doctor and "name" in doctor) else "Doctor"
     specialization = doctor.get("specialization", "General Medicine") if doctor else "General Medicine"
 
-    # 2. Parse date & check working days / blocked dates
+    # 2. Parse Date
     try:
-        req_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+        target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
-        raise ValueError("Invalid date format. Expected YYYY-MM-DD")
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD.")
 
-    schedule_cfg = await get_doctor_schedule_config(doctor_id)
+    availability = await get_doctor_availability(doctor_id)
 
-    # Check if blocked date or non-working day
-    is_blocked_date = date_str in schedule_cfg.blocked_dates
-    is_working_day = req_date.weekday() in schedule_cfg.working_days
+    # 3. Check Leave
+    leave = await check_doctor_leave(doctor_id, date_str)
+    if leave:
+        return AvailableSlotsResponse(
+            doctor_id=str(doctor_id),
+            doctor_name=doc_name,
+            specialization=specialization,
+            date=date_str,
+            duration_minutes=availability.duration_minutes,
+            buffer_minutes=availability.buffer_minutes,
+            consultation_type=appointment_type.value if appointment_type else None,
+            is_on_leave=True,
+            leave_reason=leave.reason,
+            total_available=0,
+            total_booked=0,
+            available_slots=[],
+            booked_slots=[],
+            unavailable_periods=[
+                UnavailablePeriod(
+                    start_time="00:00",
+                    end_time="23:59",
+                    reason=f"Doctor on Leave: {leave.reason}"
+                )
+            ]
+        )
 
-    # Generate all candidate slot strings
-    candidate_slot_strings = []
-    if is_working_day and not is_blocked_date:
-        for shift in schedule_cfg.shifts:
-            candidate_slot_strings.extend(
-                generate_time_slots_for_shift(shift, schedule_cfg.slot_duration_minutes)
-            )
+    # 4. Check Working Day
+    day_of_week = target_date.weekday()  # 0=Mon, 6=Sun
+    if day_of_week not in availability.working_days:
+        return AvailableSlotsResponse(
+            doctor_id=str(doctor_id),
+            doctor_name=doc_name,
+            specialization=specialization,
+            date=date_str,
+            duration_minutes=availability.duration_minutes,
+            buffer_minutes=availability.buffer_minutes,
+            consultation_type=appointment_type.value if appointment_type else None,
+            is_on_leave=False,
+            total_available=0,
+            total_booked=0,
+            available_slots=[],
+            booked_slots=[],
+            unavailable_periods=[
+                UnavailablePeriod(
+                    start_time="00:00",
+                    end_time="23:59",
+                    reason="Doctor does not consult on this day of the week"
+                )
+            ]
+        )
 
-    # If no shifts configured or default fallback needed
-    if not candidate_slot_strings and is_working_day and not is_blocked_date:
-        candidate_slot_strings = [
-            "9:00 AM", "9:30 AM", "10:00 AM", "10:30 AM", "11:00 AM", "11:30 AM",
-            "2:00 PM", "2:30 PM", "3:00 PM", "3:30 PM", "4:00 PM", "4:30 PM"
-        ]
-
-    # 3. Query active bookings for this doctor & date
+    # 5. Query Existing Active Bookings
     active_statuses = [
         AppointmentStatus.CONFIRMED.value,
-        AppointmentStatus.PENDING_CONFIRMATION.value,
-        AppointmentStatus.IN_PROGRESS.value,
-        "confirmed", "pending", "booked"
+        AppointmentStatus.HELD.value,
+        "confirmed",
+        "pending",
     ]
+    booked_slots_data: List[SlotItem] = []
+    booked_time_intervals: List[Tuple[datetime.time, datetime.time]] = []
 
-    booked_times = set()
     try:
-        booked_appointments_cursor = db.appointments.find({
+        cursor = db.appointments.find({
             "doctor_id": str(doctor_id),
             "date": date_str,
             "status": {"$in": active_statuses}
         })
-        async for appt in booked_appointments_cursor:
-            time_val = appt.get("time", "")
+        async for appt in cursor:
+            t_str = appt.get("time", "")
             try:
-                parsed_t = _parse_time_str(time_val)
-                booked_times.add(_format_time_display(parsed_t))
-            except Exception:
-                booked_times.add(time_val.strip())
+                b_start = parse_time(t_str)
+                dur = appt.get("duration_minutes", availability.duration_minutes)
+                b_end = add_minutes(b_start, dur)
+                booked_time_intervals.append((b_start, b_end))
+
+                c_type = appt.get("consultation_type", ConsultationType.IN_PERSON.value)
+                try:
+                    c_enum = ConsultationType(c_type)
+                except Exception:
+                    c_enum = ConsultationType.IN_PERSON
+
+                booked_slots_data.append(SlotItem(
+                    time=format_time_24(b_start),
+                    end_time=format_time_24(b_end),
+                    status=AppointmentStatus.CONFIRMED,
+                    is_emergency=False,
+                    consultation_type=c_enum,
+                ))
+            except Exception as e:
+                logger.warning(f"Could not parse booked appointment time {t_str}: {e}")
     except Exception as e:
-        logger.warning(f"Could not query appointments from DB: {e}")
+        logger.warning(f"Error querying booked appointments: {e}")
 
-    # 4. Check lock status and construct SlotInfo list
-    slot_info_list: List[SlotInfo] = []
-    available_count = 0
+    # 6. Parse Shifts & Breaks
+    unavailable_periods_data: List[UnavailablePeriod] = []
+    for b in availability.breaks:
+        unavailable_periods_data.append(UnavailablePeriod(
+            start_time=b.start_time,
+            end_time=b.end_time,
+            reason=b.title or "Scheduled Break"
+        ))
 
-    today = datetime.date.today()
-    now_time = datetime.datetime.now().time()
-    is_past_day = req_date < today
+    # 7. Generate Candidate Slots
+    duration = availability.duration_minutes
+    buffer_min = availability.buffer_minutes
+    emergency_slot_set = set(availability.emergency_slots)
 
-    for slot_time in candidate_slot_strings:
-        # Check if slot in past for today
-        is_past_slot = False
-        if req_date == today:
-            try:
-                if _parse_time_str(slot_time) <= now_time:
-                    is_past_slot = True
-            except Exception:
-                pass
+    now = datetime.datetime.now()
+    today_date = now.date()
+    current_time = now.time()
+    is_today = (target_date == today_date)
+    is_past_day = (target_date < today_date)
 
-        if is_past_day or is_past_slot or is_blocked_date:
-            slot_info_list.append(SlotInfo(
-                doctor_id=str(doctor_id),
-                date=date_str,
-                time=slot_time,
-                status=SlotStatus.BLOCKED,
-            ))
+    available_slots_data: List[SlotItem] = []
+
+    for shift in availability.shifts:
+        try:
+            shift_start = parse_time(shift.start_time)
+            shift_end = parse_time(shift.end_time)
+        except Exception:
             continue
 
-        if slot_time in booked_times:
-            slot_info_list.append(SlotInfo(
-                doctor_id=str(doctor_id),
-                date=date_str,
-                time=slot_time,
-                status=SlotStatus.BOOKED,
-            ))
-            continue
+        curr_start = shift_start
 
-        # Check Redis/in-memory distributed lock status
-        is_locked, held_by_me, remaining_ttl = await get_slot_lock_status(
-            doctor_id=str(doctor_id),
-            date=date_str,
-            time_slot=slot_time,
-            current_user_id=current_user_id
-        )
+        while True:
+            curr_end = add_minutes(curr_start, duration)
 
-        if is_locked:
-            slot_info_list.append(SlotInfo(
-                doctor_id=str(doctor_id),
-                date=date_str,
-                time=slot_time,
-                status=SlotStatus.LOCKED,
-                held_by_current_user=held_by_me,
-                expires_in_seconds=remaining_ttl,
-            ))
-            if held_by_me:
-                available_count += 1
-        else:
-            slot_info_list.append(SlotInfo(
-                doctor_id=str(doctor_id),
-                date=date_str,
-                time=slot_time,
-                status=SlotStatus.AVAILABLE,
-            ))
-            available_count += 1
+            # If slot exceeds shift end time, break shift loop
+            if curr_end > shift_end or (curr_end < curr_start and shift_end < shift_start):
+                break
 
-    return DoctorSlotsResponse(
+            # Check break overlap
+            in_break = False
+            for b in availability.breaks:
+                try:
+                    b_start = parse_time(b.start_time)
+                    b_end = parse_time(b.end_time)
+                    if is_overlapping(curr_start, curr_end, b_start, b_end):
+                        in_break = True
+                        curr_start = b_end
+                        break
+                except Exception:
+                    pass
+
+            if in_break:
+                continue
+
+            curr_start_str = format_time_24(curr_start)
+            curr_end_str = format_time_24(curr_end)
+
+            # Check if booked
+            is_booked = False
+            for b_start, b_end in booked_time_intervals:
+                if is_overlapping(curr_start, curr_end, b_start, b_end):
+                    is_booked = True
+                    break
+
+            # Check if in past
+            is_past_slot = is_past_day or (is_today and curr_start <= current_time)
+
+            is_emergency = (curr_start_str in emergency_slot_set)
+
+            if not is_booked and not is_past_slot:
+                c_type = appointment_type or ConsultationType.IN_PERSON
+                available_slots_data.append(SlotItem(
+                    time=curr_start_str,
+                    end_time=curr_end_str,
+                    status=AppointmentStatus.AVAILABLE,
+                    is_emergency=is_emergency,
+                    consultation_type=c_type,
+                ))
+
+            # Advance by duration + buffer_minutes
+            next_start = add_minutes(curr_end, buffer_min)
+            if next_start <= curr_start:  # overflow protection
+                break
+            curr_start = next_start
+
+    # Sort available slots by time
+    available_slots_data.sort(key=lambda s: s.time)
+    booked_slots_data.sort(key=lambda s: s.time)
+
+    return AvailableSlotsResponse(
         doctor_id=str(doctor_id),
         doctor_name=doc_name,
         specialization=specialization,
         date=date_str,
-        slot_duration_minutes=schedule_cfg.slot_duration_minutes,
-        total_slots=len(slot_info_list),
-        available_slots=available_count,
-        slots=slot_info_list
+        duration_minutes=duration,
+        buffer_minutes=buffer_min,
+        consultation_type=appointment_type.value if appointment_type else None,
+        is_on_leave=False,
+        total_available=len(available_slots_data),
+        total_booked=len(booked_slots_data),
+        available_slots=available_slots_data,
+        booked_slots=booked_slots_data,
+        unavailable_periods=unavailable_periods_data,
     )

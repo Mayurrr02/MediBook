@@ -1,18 +1,21 @@
+import datetime
 from typing import List, Optional
-from bson import ObjectId
-from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from database import db
 from models import (
+    AvailableSlotsResponse,
+    BookAppointmentRequest,
     Appointment,
     CancelAppointmentRequest,
     RescheduleAppointmentRequest,
     UpdateAppointmentStatusRequest,
-    AppointmentResponse,
-    AppointmentStatus,
+    SlotHoldRequest,
+    SlotHoldResponse,
+    SlotReleaseRequest,
+    ConsultationType,
 )
 from dependencies import get_current_user
+from services.scheduling_service import calculate_available_slots
 from services.appointment_service import (
     book_appointment as service_book_appointment,
     cancel_appointment as service_cancel_appointment,
@@ -20,129 +23,188 @@ from services.appointment_service import (
     update_appointment_status as service_update_appointment_status,
     list_user_appointments,
 )
+from services.lock_service import (
+    acquire_slot_lock,
+    release_slot_lock,
+)
 
 router = APIRouter(tags=["appointments"])
 
 
-@router.post("/appointment")
-async def book_appointment(appo: Appointment, user: dict = Depends(get_current_user)):
+# --- Slot Generation Endpoint ---
+@router.get("/api/v1/appointments/available-slots", response_model=AvailableSlotsResponse)
+@router.get("/appointments/available-slots", response_model=AvailableSlotsResponse)
+async def get_available_slots(
+    doctor_id: str = Query(..., description="ID of the doctor"),
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)"),
+    appointment_type: Optional[str] = Query(None, description="IN_PERSON or VIDEO"),
+):
     """
-    Books an appointment for the authenticated patient with distributed locking
-    and double-booking prevention.
+    Dynamically generates and returns available appointment slots, booked slots,
+    and unavailable periods (breaks, leaves, off-hours) for a doctor on a specific date.
     """
-    res = await service_book_appointment(
-        doctor_id=appo.doctor_id,
-        date=appo.date,
-        time_slot=appo.time,
-        user=user,
-        lock_token=appo.lock_token,
-        reason=appo.reason,
-        patient_notes=appo.patient_notes,
-    )
-    return {
-        "message": "appointment created",
-        "id": res["id"],
-        "status": res.get("status", AppointmentStatus.CONFIRMED.value),
-        "doctor_name": res.get("doctor_name"),
-        "date": res.get("date"),
-        "time": res.get("time"),
-    }
+    if not date:
+        date = datetime.date.today().strftime("%Y-%m-%d")
 
-
-@router.get("/appointments")
-async def get_appointments(user: dict = Depends(get_current_user)):
-    """
-    Retrieves all appointments booked by the authenticated user.
-    """
-    return await list_user_appointments(user["_id"])
-
-
-@router.get("/appointments/{appointment_id}")
-async def get_appointment_by_id(appointment_id: str, user: dict = Depends(get_current_user)):
-    """
-    Retrieves a single appointment by ID with permission check.
-    """
-    try:
-        appt = await db.appointments.find_one({"_id": ObjectId(appointment_id)})
-    except (InvalidId, Exception):
-        appt = None
-
-    if not appt:
-        raise HTTPException(status_code=404, detail="Appointment not found")
-
-    user_id = str(user["_id"])
-    is_owner = str(appt.get("user_id")) == user_id
-    is_admin = bool(user.get("is_admin"))
-
-    if not (is_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to view this appointment")
-
-    doctor = None
-    if appt.get("doctor_id"):
+    c_type_enum = None
+    if appointment_type:
         try:
-            doctor = await db.doctors.find_one({"_id": ObjectId(appt["doctor_id"])})
-        except Exception:
-            pass
+            c_type_enum = ConsultationType(appointment_type.upper())
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid appointment_type: {appointment_type}. Must be IN_PERSON or VIDEO.")
 
-    return {
-        "_id": str(appt["_id"]),
-        "doctor_id": appt.get("doctor_id"),
-        "doctor_name": appt.get("doctor_name") or (doctor["name"] if doctor else "Unknown Doctor"),
-        "specialization": appt.get("specialization") or (doctor["specialization"] if doctor else "General"),
-        "date": appt.get("date"),
-        "time": appt.get("time"),
-        "status": appt.get("status", AppointmentStatus.CONFIRMED.value),
-        "reason": appt.get("reason"),
-        "patient_notes": appt.get("patient_notes"),
-        "created_at": appt.get("created_at"),
-        "cancelled_at": appt.get("cancelled_at"),
-        "cancellation_reason": appt.get("cancellation_reason"),
-    }
+    try:
+        return await calculate_available_slots(
+            doctor_id=doctor_id,
+            date_str=date,
+            appointment_type=c_type_enum,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to calculate slots: {str(e)}")
 
 
+# --- Distributed Slot Locking (Temporary Hold) ---
+@router.post("/api/v1/appointments/hold-slot", response_model=SlotHoldResponse)
+@router.post("/api/v1/slots/hold", response_model=SlotHoldResponse)
+async def hold_slot_endpoint(
+    req: SlotHoldRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Acquires an atomic distributed lock on an appointment slot for 5 minutes (TTL),
+    preventing other users from taking the slot during checkout.
+    """
+    user_id = str(user.get("_id") or user.get("id"))
+    success, lock_token, expires_in, msg = await acquire_slot_lock(
+        doctor_id=req.doctor_id,
+        date=req.date,
+        time_slot=req.time,
+        user_id=user_id,
+        ttl_seconds=req.ttl_seconds or 300,
+    )
+
+    if not success:
+        raise HTTPException(status_code=409, detail=msg)
+
+    return SlotHoldResponse(
+        success=True,
+        lock_token=lock_token,
+        doctor_id=req.doctor_id,
+        date=req.date,
+        time=req.time,
+        expires_in_seconds=expires_in,
+        message=msg,
+    )
+
+
+@router.post("/api/v1/appointments/release-slot")
+@router.post("/api/v1/slots/release")
+async def release_slot_endpoint(
+    req: SlotReleaseRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Releases a held slot lock early if patient closes modal or deselects slot.
+    """
+    user_id = str(user.get("_id") or user.get("id"))
+    released = await release_slot_lock(
+        doctor_id=req.doctor_id,
+        date=req.date,
+        time_slot=req.time,
+        user_id=user_id,
+        lock_token=req.lock_token,
+    )
+    if not released:
+        raise HTTPException(status_code=400, detail="Unable to release lock (expired or invalid token).")
+    return {"status": "released", "message": "Slot lock released successfully."}
+
+
+# --- Booking Endpoints ---
+@router.post("/api/v1/appointments", status_code=201)
+@router.post("/appointment", status_code=201)
+@router.post("/appointments", status_code=201)
+async def book_new_appointment(
+    req: BookAppointmentRequest,
+    user: dict = Depends(get_current_user)
+):
+    """
+    Validates availability, ensures no conflict, and books a new appointment.
+    """
+    return await service_book_appointment(
+        doctor_id=req.doctor_id,
+        date=req.date,
+        time_slot=req.time,
+        user=user,
+        consultation_type=req.consultation_type,
+        reason=req.reason,
+        patient_notes=req.patient_notes,
+        lock_token=req.lock_token,
+    )
+
+
+# --- User Appointments History ---
+@router.get("/api/v1/appointments")
+@router.get("/appointments")
+async def get_my_appointments(user: dict = Depends(get_current_user)):
+    """
+    Returns all appointments booked by the current authenticated user.
+    """
+    return await list_user_appointments(user.get("_id") or user.get("id"))
+
+
+# --- Cancellation ---
+@router.post("/api/v1/appointments/{appointment_id}/cancel")
 @router.post("/appointments/{appointment_id}/cancel")
-async def cancel_appointment(
+async def cancel_appointment_endpoint(
     appointment_id: str,
     req: CancelAppointmentRequest = CancelAppointmentRequest(),
     user: dict = Depends(get_current_user)
 ):
     """
-    Cancels an existing appointment.
+    Cancels an appointment, recording audit information without deleting the record.
     """
     return await service_cancel_appointment(
         appointment_id=appointment_id,
         user=user,
-        reason=req.reason or "Patient requested cancellation"
+        reason=req.reason
     )
 
 
+# --- Rescheduling ---
+@router.post("/api/v1/appointments/{appointment_id}/reschedule")
 @router.post("/appointments/{appointment_id}/reschedule")
-async def reschedule_appointment(
+@router.patch("/api/v1/appointments/{appointment_id}/reschedule")
+async def reschedule_appointment_endpoint(
     appointment_id: str,
     req: RescheduleAppointmentRequest,
     user: dict = Depends(get_current_user)
 ):
     """
-    Reschedules an existing appointment to a new date/time slot.
+    Reschedules an appointment to a new date and time slot, preserving appointment history.
     """
     return await service_reschedule_appointment(
         appointment_id=appointment_id,
         new_date=req.new_date,
         new_time=req.new_time,
         user=user,
+        new_consultation_type=req.new_consultation_type,
         new_lock_token=req.new_lock_token,
         reason=req.reason,
     )
 
 
+# --- Status Update (Doctor / Admin) ---
+@router.patch("/api/v1/appointments/{appointment_id}/status")
 @router.patch("/appointments/{appointment_id}/status")
-async def update_status(
+async def update_status_endpoint(
     appointment_id: str,
     req: UpdateAppointmentStatusRequest,
     user: dict = Depends(get_current_user)
 ):
     """
-    Updates the lifecycle status of an appointment (Doctor / Admin).
+    Transitions appointment lifecycle state (e.g. COMPLETED, NO_SHOW).
     """
     return await service_update_appointment_status(
         appointment_id=appointment_id,

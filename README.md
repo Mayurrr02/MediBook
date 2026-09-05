@@ -1,102 +1,180 @@
 # MediBook: Intelligent Healthcare Appointment & Scheduling Platform
 
-MediBook is a production-oriented intelligent healthcare appointment scheduling platform built on a modular monolith architecture with FastAPI, MongoDB, Redis, and React.
+MediBook is a production-oriented healthcare appointment scheduling platform built on a modular architecture with FastAPI, MongoDB, and React.
 
 > [!NOTE]
-> **Safety & Engineering Notice**: MediBook is an engineering showcase and scheduling platform. It does not provide medical diagnoses or claim HIPAA compliance.
+> **Safety & Medical Notice**: MediBook is an engineering showcase and scheduling platform. It does not provide medical diagnoses or claim HIPAA compliance.
 
 ---
 
 ## 🛠️ Tech Stack
-- **Backend**: Python 3.9+, FastAPI, Motor (Async MongoDB), Redis (Distributed Locks & In-Memory Cache)
+- **Backend**: Python 3.9+, FastAPI, Motor (Async MongoDB Driver)
 - **Frontend**: React 18, Vite, React Router, Axios
-- **Payments**: Razorpay (Order creation + HMAC-SHA256 signature verification + Webhooks)
-- **AI & Triage**: Google GenAI (Gemini) with clinical triage and emergency guardrails
-- **Testing**: Pytest & pytest-asyncio test suite with high-concurrency race condition testing
+- **Payments**: Razorpay (Order creation + signature verification + webhook)
+- **AI Symptom Intake**: Google GenAI (Gemini) triage with emergency guardrails
+- **Testing**: Pytest & pytest-asyncio automated test suites
 
 ---
 
-## 🚀 Key Features Implemented (Phase 1)
+## 📅 Scheduling Engine Architecture (Phase 1)
 
-### 1. Dynamic Scheduling Engine
-- Dynamic time-slot generation computed on demand based on doctor working hours, shift start/end, break intervals (e.g. lunch breaks), and blocked vacation dates.
-- Configurable doctor schedules via `GET /doctor/{id}/schedule` and `PUT /doctor/{id}/schedule`.
+### 1. Dynamic Doctor Availability & Working Shifts
+Doctors configure their availability via `DoctorAvailability` and `DoctorLeave` models:
+- **Working Days**: e.g., Monday through Friday (`0` to `4`)
+- **Working Shifts**: Multiple daily time intervals (e.g., `09:00 - 13:00` and `14:00 - 18:00`)
+- **Break Periods**: Dedicated break blocks (e.g., `13:00 - 14:00` Lunch Break)
+- **Appointment Duration**: Configurable duration per consultation (e.g., `30` minutes)
+- **Buffer Time**: Automatic gap between back-to-back appointments (e.g., `10` minutes)
+- **Leaves & Holidays**: Date-range leaves with reasons (e.g., annual conference, vacation)
+- **Emergency Slots**: Configurable priority reserve slots
 
-### 2. Redis Distributed Slot Locking
-- Distributed mutex locking on slots using atomic Redis `SET ... NX EX` with configurable TTL (default 300s).
-- Atomic lock release via SHA Lua script ensuring only the token holder can release the lock.
-- Zero double-booking guarantee under concurrent booking attempts.
-- Graceful in-memory fallback for local environments without an active Redis instance.
+### 2. Real-Time Slot Calculation Logic
+Available slots are calculated **dynamically on demand** rather than statically pre-allocated in the database:
+$$\text{Next Slot Start} = \text{Slot Start} + \text{Duration} + \text{Buffer}$$
 
-### 3. Formal Appointment Lifecycle State Machine
-- Strict status transitions:
-  - `PENDING_CONFIRMATION` ➔ `CONFIRMED`
-  - `CONFIRMED` ➔ `IN_PROGRESS` | `COMPLETED` | `CANCELLED` | `RESCHEDULED` | `NO_SHOW`
-  - `IN_PROGRESS` ➔ `COMPLETED` | `CANCELLED`
-  - `COMPLETED`, `CANCELLED`, `RESCHEDULED`, `NO_SHOW` are immutable terminal states.
-- Dedicated endpoints for cancellation (`POST /appointments/{id}/cancel`), rescheduling (`POST /appointments/{id}/reschedule`), and status updating (`PATCH /appointments/{id}/status`).
-
-### 4. Comprehensive Automated Test Suite
-- 15 automated Pytest unit and integration tests covering:
-  - Scheduling slot math & break overlaps
-  - Redis distributed locking, token validation, and TTL expiry
-  - 20-concurrent-user race condition simulations
-  - State machine transition validation
-  - API endpoints and health checks
+1. Checks if the requested date falls within doctor leave dates or non-working days.
+2. Iterates over shifts, generating slots of duration $D$ followed by buffer $B$.
+3. Checks for break overlaps and skips break intervals.
+4. Checks existing active bookings (`CONFIRMED`, `HELD`) and excludes booked intervals.
+5. Excludes past times for current-day queries.
+6. Returns `available_slots`, `booked_slots`, and `unavailable_periods`.
 
 ---
 
-## 🔧 Setup & Running
+## 🔄 Appointment Lifecycle State Machine
 
-### Backend Setup
-```bash
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # Configure MONGO_URI, REDIS_URL, JWT_SECRET, etc.
-uvicorn main:app --reload
-```
-- API runs at `http://127.0.0.1:8000`
-- Interactive Swagger docs at `http://127.0.0.1:8000/docs`
-- Health check at `http://127.0.0.1:8000/health`
+Appointments transition strictly according to the following validated lifecycle:
 
-### Running Backend Tests
-```bash
-cd backend
-pytest backend/tests -v
+```
+                  ┌──────────────────────┐
+                  │      AVAILABLE       │
+                  └──────────┬───────────┘
+                             │
+                             ▼
+                  ┌──────────────────────┐
+                  │      CONFIRMED       │◄─────────────┐ (Rescheduled To)
+                  └──────────┬───────────┘              │
+                             │                          │
+         ┌───────────────────┼───────────────────┐      │
+         │                   │                   │      │
+         ▼                   ▼                   ▼      │
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│    COMPLETED    │ │    CANCELLED    │ │     NO_SHOW     │
+│ (Terminal State)│ │ (Terminal State)│ │ (Terminal State)│
+└─────────────────┘ └────────┬────────┘ └─────────────────┘
+                             │
+                             └────────────► [Linked to New Appointment on Reschedule]
 ```
 
-### Frontend Setup
-```bash
-cd frontend
-npm install
-npm run dev
-```
-- Frontend runs at `http://localhost:5173`
+- Invalid transitions (e.g. `CANCELLED ➔ COMPLETED` or `COMPLETED ➔ CANCELLED`) are strictly rejected with `400 Bad Request`.
+- Cancellation is soft and non-destructive: records `cancelled_by`, `cancelled_at`, and `cancellation_reason`.
+- Rescheduling marks the previous appointment as `CANCELLED` and reserves the new slot with `CONFIRMED`, preserving bidirectional audit history (`rescheduled_from`, `rescheduled_to`).
 
 ---
 
-## 📖 API Endpoints Overview
+## 📖 API Endpoints (Phase 1)
 
+### Appointment Scheduling
 | Method | Endpoint | Description | Auth Required |
 |---|---|---|---|
-| `GET` | `/health` | Health probe (MongoDB, Redis status) | Public |
-| `POST` | `/register` | Register new user account | Public |
-| `POST` | `/login` | Authenticate and obtain JWT | Public |
-| `GET` | `/doctors` | List all active doctors | Public |
-| `GET` | `/doctor/{id}` | Get specific doctor profile | Public |
-| `GET` | `/doctor/{id}/schedule` | Get doctor working hours & shifts | Public |
-| `PUT` | `/doctor/{id}/schedule` | Update doctor schedule | Doctor/Admin |
-| `GET` | `/doctors/{id}/slots` | Get real-time dynamic slots & lock status | Optional |
-| `POST` | `/slots/lock` | Acquire distributed lock on slot | Patient |
-| `POST` | `/slots/unlock` | Release distributed lock on slot | Patient |
-| `POST` | `/appointment` | Book appointment with lock verification | Patient |
-| `GET` | `/appointments` | List patient appointment history | Patient |
-| `GET` | `/appointments/{id}` | Get appointment details | Patient/Doctor/Admin |
-| `POST` | `/appointments/{id}/cancel` | Cancel an appointment | Patient/Doctor/Admin |
-| `POST` | `/appointments/{id}/reschedule` | Reschedule an appointment | Patient/Admin |
-| `PATCH` | `/appointments/{id}/status` | Update appointment state | Doctor/Admin |
-| `POST` | `/payment/create-order` | Create Razorpay premium order | Patient |
-| `POST` | `/payment/verify` | Verify payment signature | Patient |
-| `POST` | `/payment/webhook` | Razorpay webhook callback | Public (HMAC Verified) |
-| `POST` | `/premium/symptom-checker` | AI Symptom analysis | Premium Patient |
+| `GET` | `/api/v1/appointments/available-slots` | Dynamic available & booked slots | Public |
+| `POST` | `/api/v1/appointments` | Book appointment with conflict checks | Patient |
+| `GET` | `/api/v1/appointments` | List patient appointment history | Patient |
+| `POST` | `/api/v1/appointments/{id}/cancel` | Cancel an appointment with reason | Patient/Doctor/Admin |
+| `POST` | `/api/v1/appointments/{id}/reschedule` | Reschedule appointment to new slot | Patient/Admin |
+| `PATCH` | `/api/v1/appointments/{id}/status` | Update lifecycle state (`COMPLETED`, `NO_SHOW`) | Doctor/Admin |
+
+### Doctor Availability & Leave Management
+| Method | Endpoint | Description | Auth Required |
+|---|---|---|---|
+| `GET` | `/api/v1/doctors` | List doctors | Public |
+| `GET` | `/api/v1/doctors/{id}` | Get doctor details | Public |
+| `GET` | `/api/v1/doctors/{id}/availability` | Get working hours, shifts, breaks | Public |
+| `PUT` | `/api/v1/doctors/{id}/availability` | Update doctor availability | Doctor/Admin |
+| `GET` | `/api/v1/doctors/{id}/leaves` | List approved leave dates | Public |
+| `POST` | `/api/v1/doctors/{id}/leaves` | Add leave period | Doctor/Admin |
+| `DELETE` | `/api/v1/doctors/{id}/leaves/{leave_id}` | Cancel/delete leave record | Doctor/Admin |
+
+---
+
+## 📋 Example Booking Flow
+
+### 1. Query Dynamic Available Slots
+`GET /api/v1/appointments/available-slots?doctor_id=60c72b2f9b1d8b2bad000001&date=2026-10-12&appointment_type=IN_PERSON`
+
+**Response (`200 OK`)**:
+```json
+{
+  "doctor_id": "60c72b2f9b1d8b2bad000001",
+  "doctor_name": "Dr. Sarah Jenkins",
+  "specialization": "Cardiology",
+  "date": "2026-10-12",
+  "duration_minutes": 30,
+  "buffer_minutes": 10,
+  "consultation_type": "IN_PERSON",
+  "is_on_leave": false,
+  "total_available": 10,
+  "total_booked": 1,
+  "available_slots": [
+    { "time": "09:00", "end_time": "09:30", "status": "AVAILABLE", "is_emergency": false, "consultation_type": "IN_PERSON" },
+    { "time": "09:40", "end_time": "10:10", "status": "AVAILABLE", "is_emergency": false, "consultation_type": "IN_PERSON" }
+  ],
+  "booked_slots": [
+    { "time": "10:20", "end_time": "10:50", "status": "CONFIRMED", "is_emergency": false, "consultation_type": "IN_PERSON" }
+  ],
+  "unavailable_periods": [
+    { "start_time": "13:00", "end_time": "14:00", "reason": "Lunch Break" }
+  ]
+}
+```
+
+### 2. Confirm Booking
+`POST /api/v1/appointments`  
+Header: `Authorization: Bearer <jwt_token>`
+
+**Request**:
+```json
+{
+  "doctor_id": "60c72b2f9b1d8b2bad000001",
+  "date": "2026-10-12",
+  "time": "09:00",
+  "consultation_type": "IN_PERSON",
+  "reason": "Routine Cardiology Examination",
+  "patient_notes": "Mild fatigue in the mornings"
+}
+```
+
+**Response (`201 Created`)**:
+```json
+{
+  "id": "66da9bc72b2f9b1d8b200001",
+  "message": "Appointment confirmed successfully",
+  "status": "CONFIRMED",
+  "doctor_id": "60c72b2f9b1d8b2bad000001",
+  "doctor_name": "Dr. Sarah Jenkins",
+  "specialization": "Cardiology",
+  "patient_id": "60c72b2f9b1d8b2bad000099",
+  "patient_name": "John Doe",
+  "date": "2026-10-12",
+  "time": "09:00",
+  "end_time": "09:30",
+  "duration_minutes": 30,
+  "consultation_type": "IN_PERSON",
+  "reason": "Routine Cardiology Examination"
+}
+```
+
+---
+
+## 🧪 Running Tests & Build
+
+```bash
+# Run backend test suite (17/17 tests)
+cd backend
+source venv/bin/activate
+pytest backend/tests -v
+
+# Run frontend build
+cd ../frontend
+npm run build
+```

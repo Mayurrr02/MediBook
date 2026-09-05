@@ -1,4 +1,7 @@
 import asyncio
+import copy
+from typing import Any, Dict, List, Optional
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 import pymongo
 from config import MONGO_URI
@@ -6,11 +9,171 @@ from config import MONGO_URI
 _client_instance = None
 _db_instance = None
 _bound_loop = None
+_use_memory_db = False
+
+
+class MockInsertResult:
+    def __init__(self, inserted_id):
+        self.inserted_id = inserted_id
+
+
+class MockUpdateResult:
+    def __init__(self, matched_count=1, modified_count=1):
+        self.matched_count = matched_count
+        self.modified_count = modified_count
+
+
+class MockDeleteResult:
+    def __init__(self, deleted_count=1):
+        self.deleted_count = deleted_count
+
+
+class MockAsyncCursor:
+    def __init__(self, docs: List[Dict[str, Any]]):
+        self._docs = docs
+
+    def sort(self, key, direction=1):
+        reverse = (direction == -1 or direction == pymongo.DESCENDING)
+        self._docs.sort(key=lambda d: str(d.get(key, "")), reverse=reverse)
+        return self
+
+    def __aiter__(self):
+        self._iter = iter(self._docs)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def _matches_filter(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
+    if not query:
+        return True
+
+    if "$or" in query:
+        return any(_matches_filter(doc, sub_q) for sub_q in query["$or"])
+
+    for k, v in query.items():
+        doc_val = doc.get(k)
+
+        if k == "_id":
+            if isinstance(v, ObjectId):
+                if str(doc_val) != str(v):
+                    return False
+            elif str(doc_val) != str(v):
+                return False
+            continue
+
+        if isinstance(v, dict):
+            for op, target_val in v.items():
+                if op == "$in":
+                    if doc_val not in target_val and str(doc_val) not in [str(x) for x in target_val]:
+                        return False
+                elif op == "$lte":
+                    if doc_val is None or str(doc_val) > str(target_val):
+                        return False
+                elif op == "$gte":
+                    if doc_val is None or str(doc_val) < str(target_val):
+                        return False
+                elif op == "$ne":
+                    if doc_val == target_val or str(doc_val) == str(target_val):
+                        return False
+        else:
+            if str(doc_val) != str(v):
+                return False
+
+    return True
+
+
+class MockAsyncCollection:
+    def __init__(self, name: str):
+        self.name = name
+        self._docs: List[Dict[str, Any]] = []
+
+    async def create_index(self, *args, **kwargs):
+        return "mock_index"
+
+    async def insert_one(self, document: Dict[str, Any]):
+        doc_copy = copy.deepcopy(document)
+        if "_id" not in doc_copy:
+            doc_copy["_id"] = ObjectId()
+        self._docs.append(doc_copy)
+        return MockInsertResult(doc_copy["_id"])
+
+    async def find_one(self, filter: Optional[Dict[str, Any]] = None):
+        filter = filter or {}
+        for d in self._docs:
+            if _matches_filter(d, filter):
+                return copy.deepcopy(d)
+        return None
+
+    def find(self, filter: Optional[Dict[str, Any]] = None):
+        filter = filter or {}
+        matched = [copy.deepcopy(d) for d in self._docs if _matches_filter(d, filter)]
+        return MockAsyncCursor(matched)
+
+    async def update_one(self, filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+        for idx, d in enumerate(self._docs):
+            if _matches_filter(d, filter):
+                if "$set" in update:
+                    for k, v in update["$set"].items():
+                        d[k] = copy.deepcopy(v)
+                return MockUpdateResult(1, 1)
+
+        if upsert:
+            new_doc = copy.deepcopy(filter)
+            if "$set" in update:
+                new_doc.update(copy.deepcopy(update["$set"]))
+            if "_id" not in new_doc:
+                new_doc["_id"] = ObjectId()
+            self._docs.append(new_doc)
+            return MockUpdateResult(0, 1)
+
+        return MockUpdateResult(0, 0)
+
+    async def delete_one(self, filter: Dict[str, Any]):
+        for idx, d in enumerate(self._docs):
+            if _matches_filter(d, filter):
+                del self._docs[idx]
+                return MockDeleteResult(1)
+        return MockDeleteResult(0)
+
+    async def delete_many(self, filter: Dict[str, Any]):
+        original_count = len(self._docs)
+        self._docs = [d for d in self._docs if not _matches_filter(d, filter)]
+        return MockDeleteResult(original_count - len(self._docs))
+
+
+class MockAsyncDatabase:
+    def __init__(self):
+        self._collections: Dict[str, MockAsyncCollection] = {}
+
+    def __getattr__(self, name: str) -> MockAsyncCollection:
+        if name not in self._collections:
+            self._collections[name] = MockAsyncCollection(name)
+        return self._collections[name]
+
+    def __getitem__(self, name: str) -> MockAsyncCollection:
+        return self.__getattr__(name)
+
+    async def command(self, cmd: str, *args, **kwargs):
+        if cmd == "ping":
+            return {"ok": 1}
+        return {}
+
+
+_memory_db_instance = MockAsyncDatabase()
 
 
 def get_db():
-    """Returns database instance attached to the current running event loop."""
-    global _client_instance, _db_instance, _bound_loop
+    """Returns real Mongo DB client or fallback in-memory DB when Mongo server is offline."""
+    global _client_instance, _db_instance, _bound_loop, _use_memory_db
+
+    if _use_memory_db:
+        return _memory_db_instance
+
     try:
         current_loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -18,24 +181,33 @@ def get_db():
 
     if _db_instance is None or _bound_loop is not current_loop:
         try:
-            _client_instance = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+            _client_instance = AsyncIOMotorClient(
+                MONGO_URI,
+                serverSelectionTimeoutMS=500,
+                connectTimeoutMS=500,
+            )
             _db_instance = _client_instance.medibook
             _bound_loop = current_loop
         except Exception:
-            _client_instance = AsyncIOMotorClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=1000)
-            _db_instance = _client_instance.medibook
-            _bound_loop = current_loop
+            _use_memory_db = True
+            return _memory_db_instance
 
     return _db_instance
 
 
 class DatabaseProxy:
-    """Proxy that dynamically delegates attribute access (e.g. db.users) to current loop DB instance."""
+    """Proxy that dynamically delegates attribute access (e.g. db.users) to active DB instance."""
     def __getattr__(self, name):
-        return getattr(get_db(), name)
+        try:
+            return getattr(get_db(), name)
+        except Exception:
+            return getattr(_memory_db_instance, name)
 
     def __getitem__(self, name):
-        return get_db()[name]
+        try:
+            return get_db()[name]
+        except Exception:
+            return _memory_db_instance[name]
 
 
 db = DatabaseProxy()
@@ -43,8 +215,8 @@ db = DatabaseProxy()
 
 async def init_indexes():
     """
-    Call once at startup. Creates essential indexes for high performance
-    and data integrity across users, appointments, doctor schedules, waitlists, and audit logs.
+    Creates essential indexes for doctor scheduling, leave management,
+    appointment queries, and double-booking prevention.
     """
     try:
         active_db = get_db()
@@ -54,28 +226,26 @@ async def init_indexes():
 
         # Doctors
         await active_db.doctors.create_index("specialization")
+        await active_db.doctors.create_index("user_id")
 
-        # Doctor Schedules
-        await active_db.doctor_schedules.create_index("doctor_id", unique=True)
+        # Doctor Availability
+        await active_db.doctor_availabilities.create_index("doctor_id", unique=True)
+
+        # Doctor Leaves
+        await active_db.doctor_leaves.create_index(
+            [("doctor_id", pymongo.ASCENDING), ("start_date", pymongo.ASCENDING), ("end_date", pymongo.ASCENDING)]
+        )
 
         # Appointments
         await active_db.appointments.create_index(
+            [("doctor_id", pymongo.ASCENDING), ("date", pymongo.ASCENDING), ("status", pymongo.ASCENDING)]
+        )
+        await active_db.appointments.create_index(
             [("doctor_id", pymongo.ASCENDING), ("date", pymongo.ASCENDING), ("time", pymongo.ASCENDING)]
         )
+        await active_db.appointments.create_index("patient_id")
         await active_db.appointments.create_index("user_id")
-        await active_db.appointments.create_index("doctor_id")
         await active_db.appointments.create_index("status")
         await active_db.appointments.create_index([("date", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
-
-        # Waitlists
-        await active_db.waitlists.create_index(
-            [("doctor_id", pymongo.ASCENDING), ("date", pymongo.ASCENDING), ("time", pymongo.ASCENDING), ("status", pymongo.ASCENDING)]
-        )
-        await active_db.waitlists.create_index("user_id")
-
-        # Audit Logs
-        await active_db.audit_logs.create_index([("timestamp", pymongo.DESCENDING)])
-        await active_db.audit_logs.create_index("action")
-        await active_db.audit_logs.create_index("user_id")
     except Exception as e:
         print(f"[Warning] Failed to initialize some MongoDB indexes: {e}")

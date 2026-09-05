@@ -10,20 +10,26 @@ class UserRole(str, Enum):
 
 
 class AppointmentStatus(str, Enum):
-    PENDING_CONFIRMATION = "PENDING_CONFIRMATION"
+    AVAILABLE = "AVAILABLE"
+    HELD = "HELD"
     CONFIRMED = "CONFIRMED"
-    IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
-    RESCHEDULED = "RESCHEDULED"
     NO_SHOW = "NO_SHOW"
+    EXPIRED = "EXPIRED"
 
 
-class SlotStatus(str, Enum):
-    AVAILABLE = "AVAILABLE"
-    LOCKED = "LOCKED"
+class WaitlistStatus(str, Enum):
+    WAITING = "WAITING"
+    NOTIFIED = "NOTIFIED"
     BOOKED = "BOOKED"
-    BLOCKED = "BLOCKED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
+class ConsultationType(str, Enum):
+    IN_PERSON = "IN_PERSON"
+    VIDEO = "VIDEO"
 
 
 # --- Auth Models ---
@@ -39,20 +45,47 @@ class Login(BaseModel):
     password: str
 
 
-# --- Doctor & Schedule Models ---
+# --- Doctor Availability & Leave Models ---
 class WorkingShift(BaseModel):
     start_time: str = "09:00"  # 24hr HH:MM format
     end_time: str = "17:00"
-    break_start: Optional[str] = "13:00"
-    break_end: Optional[str] = "14:00"
 
 
-class DoctorScheduleConfig(BaseModel):
+class BreakPeriod(BaseModel):
+    start_time: str = "13:00"
+    end_time: str = "14:00"
+    title: str = "Lunch Break"
+
+
+class DoctorAvailability(BaseModel):
     doctor_id: Optional[str] = None
-    slot_duration_minutes: int = Field(default=30, ge=10, le=120)
-    working_days: List[int] = Field(default=[0, 1, 2, 3, 4])  # 0=Monday, 6=Sunday
-    shifts: List[WorkingShift] = Field(default_factory=lambda: [WorkingShift()])
-    blocked_dates: List[str] = Field(default_factory=list)  # ["YYYY-MM-DD"]
+    working_days: List[int] = Field(default=[0, 1, 2, 3, 4])  # 0=Monday, 4=Friday
+    shifts: List[WorkingShift] = Field(
+        default_factory=lambda: [
+            WorkingShift(start_time="09:00", end_time="13:00"),
+            WorkingShift(start_time="14:00", end_time="18:00"),
+        ]
+    )
+    breaks: List[BreakPeriod] = Field(
+        default_factory=lambda: [
+            BreakPeriod(start_time="13:00", end_time="14:00", title="Lunch Break")
+        ]
+    )
+    duration_minutes: int = Field(default=30, ge=10, le=180)
+    buffer_minutes: int = Field(default=10, ge=0, le=60)
+    emergency_slots: List[str] = Field(default_factory=list)  # e.g. ["17:00"]
+    consultation_types: List[ConsultationType] = Field(
+        default_factory=lambda: [ConsultationType.IN_PERSON, ConsultationType.VIDEO]
+    )
+
+
+class DoctorLeave(BaseModel):
+    id: Optional[str] = None
+    doctor_id: str
+    start_date: str  # YYYY-MM-DD
+    end_date: str  # YYYY-MM-DD
+    reason: Optional[str] = "Medical Leave / Vacation"
+    created_at: Optional[str] = None
 
 
 class Doctor(BaseModel):
@@ -61,39 +94,57 @@ class Doctor(BaseModel):
     experience: int
     fee: int
     bio: Optional[str] = None
-    user_id: Optional[str] = None  # Link to a user account if doctor logs in
-    schedule: Optional[DoctorScheduleConfig] = None
+    user_id: Optional[str] = None
+    consultation_types: List[ConsultationType] = Field(
+        default_factory=lambda: [ConsultationType.IN_PERSON, ConsultationType.VIDEO]
+    )
+    availability: Optional[DoctorAvailability] = None
 
 
-# --- Slot Locking & Availability Models ---
-class SlotInfo(BaseModel):
-    doctor_id: str
-    date: str  # YYYY-MM-DD
-    time: str  # e.g. "09:00 AM" or "09:00"
-    status: SlotStatus
+# --- Slot Generation Models ---
+class SlotItem(BaseModel):
+    time: str  # e.g. "09:00"
+    end_time: str  # e.g. "09:30"
+    status: AppointmentStatus = AppointmentStatus.AVAILABLE
+    is_emergency: bool = False
+    consultation_type: ConsultationType = ConsultationType.IN_PERSON
+    is_held: bool = False
     held_by_current_user: bool = False
-    expires_in_seconds: Optional[int] = None
+    lock_expires_in_seconds: Optional[int] = None
 
 
-class DoctorSlotsResponse(BaseModel):
+class UnavailablePeriod(BaseModel):
+    start_time: str
+    end_time: str
+    reason: str
+
+
+class AvailableSlotsResponse(BaseModel):
     doctor_id: str
-    doctor_name: Optional[str] = None
-    specialization: Optional[str] = None
+    doctor_name: str
+    specialization: str
     date: str
-    slot_duration_minutes: int
-    total_slots: int
-    available_slots: int
-    slots: List[SlotInfo]
+    duration_minutes: int
+    buffer_minutes: int
+    consultation_type: Optional[str] = None
+    is_on_leave: bool = False
+    leave_reason: Optional[str] = None
+    total_available: int = 0
+    total_booked: int = 0
+    available_slots: List[SlotItem] = Field(default_factory=list)
+    booked_slots: List[SlotItem] = Field(default_factory=list)
+    unavailable_periods: List[UnavailablePeriod] = Field(default_factory=list)
 
 
-class LockSlotRequest(BaseModel):
+# --- Redis Slot Locking Schemas ---
+class SlotHoldRequest(BaseModel):
     doctor_id: str
     date: str  # YYYY-MM-DD
-    time: str  # e.g. "10:00 AM"
+    time: str  # e.g. "09:00"
     ttl_seconds: Optional[int] = 300
 
 
-class LockSlotResponse(BaseModel):
+class SlotHoldResponse(BaseModel):
     success: bool
     lock_token: Optional[str] = None
     doctor_id: str
@@ -103,32 +154,44 @@ class LockSlotResponse(BaseModel):
     message: str
 
 
-class UnlockSlotRequest(BaseModel):
+class SlotReleaseRequest(BaseModel):
     doctor_id: str
     date: str
     time: str
     lock_token: str
 
 
-# --- Appointment Lifecycle Models ---
-class Appointment(BaseModel):
+# --- Appointment Booking & Lifecycle Models ---
+class BookAppointmentRequest(BaseModel):
     doctor_id: str
     date: str  # YYYY-MM-DD
-    time: str  # e.g. "10:00 AM"
-    lock_token: Optional[str] = None
-    reason: Optional[str] = None
+    time: str  # e.g. "09:00"
+    consultation_type: ConsultationType = ConsultationType.IN_PERSON
+    reason: Optional[str] = "General Consultation"
     patient_notes: Optional[str] = None
+    lock_token: Optional[str] = None
+
+
+class Appointment(BaseModel):
+    doctor_id: str
+    date: str
+    time: str
+    consultation_type: Optional[ConsultationType] = ConsultationType.IN_PERSON
+    reason: Optional[str] = "Consultation"
+    patient_notes: Optional[str] = None
+    lock_token: Optional[str] = None
 
 
 class CancelAppointmentRequest(BaseModel):
-    reason: Optional[str] = "Patient requested cancellation"
+    reason: str = "Patient requested cancellation"
 
 
 class RescheduleAppointmentRequest(BaseModel):
     new_date: str
     new_time: str
+    new_consultation_type: Optional[ConsultationType] = None
     new_lock_token: Optional[str] = None
-    reason: Optional[str] = None
+    reason: Optional[str] = "Patient rescheduled appointment"
 
 
 class UpdateAppointmentStatusRequest(BaseModel):
@@ -141,16 +204,51 @@ class AppointmentResponse(BaseModel):
     doctor_id: str
     doctor_name: str
     specialization: str
-    user_id: str
-    user_name: Optional[str] = None
+    patient_id: str
+    patient_name: Optional[str] = None
+    patient_email: Optional[str] = None
     date: str
     time: str
-    status: AppointmentStatus
+    end_time: Optional[str] = None
+    duration_minutes: int = 30
+    consultation_type: ConsultationType = ConsultationType.IN_PERSON
+    status: AppointmentStatus = AppointmentStatus.CONFIRMED
     reason: Optional[str] = None
     patient_notes: Optional[str] = None
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     cancelled_at: Optional[str] = None
+    cancelled_by: Optional[str] = None
     cancellation_reason: Optional[str] = None
+    rescheduled_to: Optional[str] = None
+    rescheduled_from: Optional[str] = None
+
+
+# --- Waitlist Models ---
+class WaitlistCreateRequest(BaseModel):
+    doctor_id: str
+    preferred_date: str  # YYYY-MM-DD
+    preferred_time: Optional[str] = None  # e.g. "09:00" or None for any slot on that date
+    consultation_type: ConsultationType = ConsultationType.IN_PERSON
+    notes: Optional[str] = None
+
+
+class WaitlistResponse(BaseModel):
+    id: str
+    patient_id: str
+    patient_name: Optional[str] = None
+    patient_email: Optional[str] = None
+    doctor_id: str
+    doctor_name: Optional[str] = None
+    specialization: Optional[str] = None
+    preferred_date: str
+    preferred_time: Optional[str] = None
+    consultation_type: ConsultationType = ConsultationType.IN_PERSON
+    status: WaitlistStatus = WaitlistStatus.WAITING
+    created_at: str
+    notified_at: Optional[str] = None
+    claim_deadline: Optional[str] = None
+    notes: Optional[str] = None
 
 
 # --- Payment Models ---
