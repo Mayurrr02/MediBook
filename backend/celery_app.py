@@ -14,6 +14,8 @@ celery_app = Celery(
         "tasks.cleanup_tasks",
     ],
 )
+app = celery_app
+celery = celery_app
 
 celery_app.conf.update(
     task_serializer="json",

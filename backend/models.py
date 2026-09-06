@@ -265,6 +265,79 @@ class PaymentVerify(BaseModel):
     razorpay_signature: str
 
 
-# --- AI Models ---
+# --- AI Intake & Doctor Matching Models (Phase 3) ---
+class UrgencyLevel(str, Enum):
+    ROUTINE = "routine"
+    URGENT = "urgent"
+    EMERGENCY = "emergency"
+
+
+class SupportedSpecialty(str, Enum):
+    GENERAL_PHYSICIAN = "General Physician"
+    CARDIOLOGIST = "Cardiologist"
+    DERMATOLOGIST = "Dermatologist"
+    PEDIATRICIAN = "Pediatrician"
+    ORTHOPEDIC = "Orthopedic"
+    NEUROLOGIST = "Neurologist"
+    ENT = "ENT"
+    DENTIST = "Dentist"
+    GYNECOLOGIST = "Gynecologist"
+
+
+class AIIntakeRequest(BaseModel):
+    message: str = Field(..., min_length=3, max_length=1500, description="Patient symptom description or query")
+    patient_id: Optional[str] = None
+    preferred_date: Optional[str] = None
+    consultation_type: Optional[ConsultationType] = ConsultationType.IN_PERSON
+
+
+class AIStructuredIntake(BaseModel):
+    symptoms: List[str] = Field(default_factory=list, description="Extracted distinct clinical symptoms")
+    duration: Optional[str] = Field(default="unknown", description="Reported duration of symptoms")
+    severity: Optional[str] = Field(default="unknown", description="Reported symptom severity (mild, moderate, severe, unknown)")
+    suggested_specialty: str = Field(default="General Physician", description="Controlled medical specialty recommendation")
+    urgency: UrgencyLevel = Field(default=UrgencyLevel.ROUTINE, description="Triage urgency classification")
+    reasoning: Optional[str] = Field(default=None, description="Non-diagnostic rationale for specialty recommendation")
+    emergency_detected: bool = Field(default=False, description="Flag indicating deterministic or LLM emergency detection")
+    emergency_advice: Optional[str] = Field(default=None, description="Emergency instructions if red flags detected")
+
+
+class DoctorMatchItem(BaseModel):
+    doctor_id: str
+    doctor_name: str
+    specialization: str
+    experience: int
+    fee: int
+    rating: float = 4.8
+    match_score: int = Field(ge=0, le=100, description="Composite matching score 0-100")
+    match_reasons: List[str] = Field(default_factory=list, description="Transparent factors explaining match score")
+    available_date: Optional[str] = None
+    next_available_slots: List[SlotItem] = Field(default_factory=list, description="Top next available slots for fast booking")
+
+
+class AIIntakeResponse(BaseModel):
+    intake: AIStructuredIntake
+    recommended_specialty: str
+    matched_doctors: List[DoctorMatchItem] = Field(default_factory=list)
+    disclaimer: str = (
+        "This evaluation is for intelligent scheduling and triage guidance only. "
+        "It does NOT constitute a medical diagnosis or treatment plan. "
+        "If you are experiencing severe symptoms, please dial 112 / 911 or visit the nearest emergency facility."
+    )
+    emergency_alert: Optional[str] = None
+
+
+class PatientIntakeRecord(BaseModel):
+    id: Optional[str] = None
+    patient_id: Optional[str] = None
+    structured_symptoms: List[str] = Field(default_factory=list)
+    duration: Optional[str] = None
+    specialty: str
+    urgency: str
+    emergency_detected: bool = False
+    created_at: str
+
+
+# Legacy / Simple Symptom Check Model
 class SymptomCheckRequest(BaseModel):
     symptoms: str = Field(min_length=3, max_length=1000)

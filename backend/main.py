@@ -3,15 +3,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import CORS_ORIGINS
-from database import init_indexes, db
+from database import init_indexes, seed_default_doctors, db
 from redis_client import get_redis, close_redis, is_redis_connected
-from routers import auth_routes, doctors, appointments, waitlists, payment, symptom_checker
+from routers import auth_routes, doctors, appointments, waitlists, payment, symptom_checker, ai_intake
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await init_indexes()
+    await seed_default_doctors()
     await get_redis()
     yield
     # Shutdown
@@ -39,6 +40,7 @@ app.include_router(appointments.router)
 app.include_router(waitlists.router)
 app.include_router(payment.router)
 app.include_router(symptom_checker.router)
+app.include_router(ai_intake.router)
 
 
 @app.get("/")

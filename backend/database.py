@@ -53,9 +53,12 @@ def _matches_filter(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
         return True
 
     if "$or" in query:
-        return any(_matches_filter(doc, sub_q) for sub_q in query["$or"])
+        if not any(_matches_filter(doc, sub_q) for sub_q in query["$or"]):
+            return False
 
     for k, v in query.items():
+        if k == "$or":
+            continue
         doc_val = doc.get(k)
 
         if k == "_id":
@@ -70,6 +73,12 @@ def _matches_filter(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
             for op, target_val in v.items():
                 if op == "$in":
                     if doc_val not in target_val and str(doc_val) not in [str(x) for x in target_val]:
+                        return False
+                elif op == "$lt":
+                    if doc_val is None or str(doc_val) >= str(target_val):
+                        return False
+                elif op == "$gt":
+                    if doc_val is None or str(doc_val) <= str(target_val):
                         return False
                 elif op == "$lte":
                     if doc_val is None or str(doc_val) > str(target_val):
@@ -94,6 +103,10 @@ class MockAsyncCollection:
 
     async def create_index(self, *args, **kwargs):
         return "mock_index"
+
+    async def count_documents(self, filter: Optional[Dict[str, Any]] = None) -> int:
+        filter = filter or {}
+        return sum(1 for d in self._docs if _matches_filter(d, filter))
 
     async def insert_one(self, document: Dict[str, Any]):
         doc_copy = copy.deepcopy(document)
@@ -249,3 +262,156 @@ async def init_indexes():
         await active_db.appointments.create_index([("date", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
     except Exception as e:
         print(f"[Warning] Failed to initialize some MongoDB indexes: {e}")
+
+
+async def seed_default_doctors():
+    """
+    Seeds initial certified doctors with realistic availability schedules
+    if the doctors collection is empty.
+    """
+    try:
+        active_db = get_db()
+        count = await active_db.doctors.count_documents({})
+        if count > 0:
+            return
+
+        default_doctors = [
+            {
+                "name": "Sarah Jenkins",
+                "email": "dr.jenkins@medibook.health",
+                "specialization": "Cardiology",
+                "experience": 12,
+                "fee": 500,
+                "availability": {
+                    "working_days": [0, 1, 2, 3, 4],  # Mon-Fri
+                    "shifts": [
+                        {"start_time": "09:00", "end_time": "13:00"},
+                        {"start_time": "14:00", "end_time": "18:00"},
+                    ],
+                    "breaks": [
+                        {"start_time": "13:00", "end_time": "14:00", "reason": "Lunch Break"}
+                    ],
+                    "slot_duration_minutes": 30,
+                    "buffer_minutes": 10,
+                    "emergency_slots_count": 2,
+                    "supported_consultations": ["IN_PERSON", "VIDEO"],
+                },
+            },
+            {
+                "name": "David Chen",
+                "email": "dr.chen@medibook.health",
+                "specialization": "Neurology",
+                "experience": 15,
+                "fee": 750,
+                "availability": {
+                    "working_days": [0, 1, 2, 3, 4],
+                    "shifts": [
+                        {"start_time": "09:00", "end_time": "12:00"},
+                        {"start_time": "13:30", "end_time": "17:30"},
+                    ],
+                    "breaks": [
+                        {"start_time": "12:00", "end_time": "13:30", "reason": "Rounds & Lunch"}
+                    ],
+                    "slot_duration_minutes": 30,
+                    "buffer_minutes": 15,
+                    "emergency_slots_count": 1,
+                    "supported_consultations": ["IN_PERSON", "VIDEO"],
+                },
+            },
+            {
+                "name": "Priya Sharma",
+                "email": "dr.sharma@medibook.health",
+                "specialization": "Pediatrics",
+                "experience": 9,
+                "fee": 400,
+                "availability": {
+                    "working_days": [0, 1, 2, 3, 4, 5],  # Mon-Sat
+                    "shifts": [
+                        {"start_time": "10:00", "end_time": "14:00"},
+                        {"start_time": "15:00", "end_time": "19:00"},
+                    ],
+                    "breaks": [
+                        {"start_time": "14:00", "end_time": "15:00", "reason": "Lunch Break"}
+                    ],
+                    "slot_duration_minutes": 20,
+                    "buffer_minutes": 10,
+                    "emergency_slots_count": 2,
+                    "supported_consultations": ["IN_PERSON", "VIDEO"],
+                },
+            },
+            {
+                "name": "Marcus Vance",
+                "email": "dr.vance@medibook.health",
+                "specialization": "Dermatology",
+                "experience": 10,
+                "fee": 600,
+                "availability": {
+                    "working_days": [0, 1, 2, 3, 4],
+                    "shifts": [
+                        {"start_time": "08:30", "end_time": "12:30"},
+                        {"start_time": "13:30", "end_time": "16:30"},
+                    ],
+                    "breaks": [
+                        {"start_time": "12:30", "end_time": "13:30", "reason": "Lunch Break"}
+                    ],
+                    "slot_duration_minutes": 30,
+                    "buffer_minutes": 10,
+                    "emergency_slots_count": 1,
+                    "supported_consultations": ["IN_PERSON", "VIDEO"],
+                },
+            },
+            {
+                "name": "Elena Rostova",
+                "email": "dr.rostova@medibook.health",
+                "specialization": "General Medicine",
+                "experience": 8,
+                "fee": 350,
+                "availability": {
+                    "working_days": [0, 1, 2, 3, 4, 5],
+                    "shifts": [
+                        {"start_time": "09:00", "end_time": "13:00"},
+                        {"start_time": "14:00", "end_time": "18:00"},
+                    ],
+                    "breaks": [
+                        {"start_time": "13:00", "end_time": "14:00", "reason": "Lunch Break"}
+                    ],
+                    "slot_duration_minutes": 30,
+                    "buffer_minutes": 10,
+                    "emergency_slots_count": 2,
+                    "supported_consultations": ["IN_PERSON", "VIDEO"],
+                },
+            },
+            {
+                "name": "James Wilson",
+                "email": "dr.wilson@medibook.health",
+                "specialization": "Orthopedics",
+                "experience": 14,
+                "fee": 700,
+                "availability": {
+                    "working_days": [0, 1, 2, 3, 4],
+                    "shifts": [
+                        {"start_time": "09:00", "end_time": "13:00"},
+                        {"start_time": "14:00", "end_time": "17:30"},
+                    ],
+                    "breaks": [
+                        {"start_time": "13:00", "end_time": "14:00", "reason": "Lunch Break"}
+                    ],
+                    "slot_duration_minutes": 30,
+                    "buffer_minutes": 15,
+                    "emergency_slots_count": 1,
+                    "supported_consultations": ["IN_PERSON", "VIDEO"],
+                },
+            },
+        ]
+
+        for d_data in default_doctors:
+            avail_data = d_data.pop("availability")
+            insert_res = await active_db.doctors.insert_one(d_data)
+            doc_id = str(insert_res.inserted_id)
+            avail_data["doctor_id"] = doc_id
+            await active_db.doctor_availabilities.insert_one(avail_data)
+
+        print("[Seed] Successfully seeded 6 default doctors and availability schedules.")
+    except Exception as e:
+        print(f"[Seed Warning] Failed to auto-seed default doctors: {e}")
+

@@ -15,11 +15,11 @@ export default function SymptomChecker() {
     return (
       <div className="auth-page">
         <div className="auth-card">
-          <h2>Premium Feature</h2>
-          <p>The AI Symptom Checker is available to Premium members.</p>
-          <button onClick={() => navigate("/premium")}>Upgrade Now</button>
-          <p>
-            <Link to="/dashboard">Back to dashboard</Link>
+          <h2>MediBook AI Health Assistant</h2>
+          <p>The interactive AI Assistant & Doctor Matching engine is now available in your dashboard.</p>
+          <button onClick={() => navigate("/dashboard")}>Open Assistant in Dashboard</button>
+          <p style={{ marginTop: "12px" }}>
+            <Link to="/premium">Upgrade to Premium</Link> • <Link to="/dashboard">Back to dashboard</Link>
           </p>
         </div>
       </div>
